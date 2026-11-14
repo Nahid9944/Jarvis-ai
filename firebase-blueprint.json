@@ -1,0 +1,192 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Personal AI assistant owner profile",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Owner display name"
+        },
+        "email": {
+          "type": "string",
+          "description": "Owner email address"
+        },
+        "assistantName": {
+          "type": "string",
+          "description": "Preferred assistant name"
+        },
+        "preferredLanguage": {
+          "type": "string",
+          "description": "Preferred conversation language"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp via serverTimestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update timestamp via serverTimestamp"
+        }
+      },
+      "required": ["userId", "createdAt", "updatedAt"]
+    },
+    "Memory": {
+      "title": "Memory",
+      "description": "Personal AI long-term memory entry",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Memory title or key"
+        },
+        "content": {
+          "type": "string",
+          "description": "Memory content"
+        },
+        "category": {
+          "type": "string",
+          "description": "Memory category"
+        },
+        "importance": {
+          "type": "integer",
+          "description": "Memory importance score"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user ID"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        }
+      },
+      "required": ["key", "content", "userId", "createdAt", "updatedAt"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "Personal AI scheduled task or reminder",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Task title"
+        },
+        "description": {
+          "type": "string",
+          "description": "Task description"
+        },
+        "status": {
+          "type": "string",
+          "description": "PENDING or COMPLETED"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user ID"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        }
+      },
+      "required": ["title", "userId", "createdAt", "updatedAt"]
+    },
+    "Note": {
+      "title": "Note",
+      "description": "Personal AI note or memo",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Note title"
+        },
+        "content": {
+          "type": "string",
+          "description": "Note content"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user ID"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        }
+      },
+      "required": ["title", "userId", "createdAt", "updatedAt"]
+    },
+    "CharacterProfile": {
+      "title": "CharacterProfile",
+      "description": "AI companion personality configuration",
+      "type": "object",
+      "properties": {
+        "modeId": {
+          "type": "string",
+          "description": "Personality mode identifier"
+        },
+        "userId": {
+          "type": "string",
+          "description": "Owner user ID"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp"
+        }
+      },
+      "required": ["modeId", "userId", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Owner profile collection"
+    },
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": "Memory",
+      "description": "Personal AI memories subcollection"
+    },
+    "/users/{userId}/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "Personal AI tasks subcollection"
+    },
+    "/users/{userId}/notes/{noteId}": {
+      "schema": "Note",
+      "description": "Personal AI notes subcollection"
+    },
+    "/users/{userId}/character_profiles/{profileId}": {
+      "schema": "CharacterProfile",
+      "description": "Companion personality configurations"
+    }
+  }
+}

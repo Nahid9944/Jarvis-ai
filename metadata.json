@@ -1,0 +1,8 @@
+{
+  "name": "NAHID AI",
+  "description": "NAHID AI — Personal Intelligent AI Assistant & Voice-First Operating Companion (মায়া / J.A.R.V.I.S.)",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
