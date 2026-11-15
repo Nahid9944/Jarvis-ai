@@ -379,6 +379,10 @@ class JarvisWakeWordService : Service() {
 
     private fun startListening() {
         if (isPaused || isCurrentlyListening || GeminiLiveAnnouncementAdapter.isInActiveCall.value) return
+        if (!com.example.audio.MicrophoneCoordinator.tryAcquire(com.example.audio.MicOwner.WAKE_WORD_SERVICE, preempt = false)) {
+            Log.d(TAG, "Wake-word recognizer deferred: mic owned by ${com.example.audio.MicrophoneCoordinator.currentOwner.value}")
+            return
+        }
         try {
             if (speechRecognizer == null) {
                 setupSpeechRecognizer()
@@ -387,6 +391,7 @@ class JarvisWakeWordService : Service() {
             isCurrentlyListening = true
         } catch (e: Exception) {
             isCurrentlyListening = false
+            com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.WAKE_WORD_SERVICE)
             // Re-setup on fatal error
             setupSpeechRecognizer()
         }
@@ -400,6 +405,7 @@ class JarvisWakeWordService : Service() {
             // ignore
         }
         isCurrentlyListening = false
+        com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.WAKE_WORD_SERVICE)
     }
 
     override fun onDestroy() {

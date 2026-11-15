@@ -36,6 +36,15 @@ data class LiveTranscriptEvent(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+data class ToolExecutionTelemetry(
+    val id: String,
+    val toolName: String,
+    val module: String,
+    val durationMs: Long,
+    val status: String, // RUNNING, SUCCEEDED, PERMISSION_REQUIRED, CONFIRMATION_REQUIRED, FAILED
+    val timestamp: Long = System.currentTimeMillis()
+)
+
 class GeminiLiveSessionManager(
     private val context: Context? = null,
     private val toolExecutor: AssistantToolExecutor,
@@ -163,6 +172,9 @@ class GeminiLiveSessionManager(
     private val _transcriptEvents = MutableSharedFlow<LiveTranscriptEvent>(extraBufferCapacity = 32)
     val transcriptEvents: SharedFlow<LiveTranscriptEvent> = _transcriptEvents.asSharedFlow()
 
+    private val _toolTelemetry = MutableStateFlow<List<ToolExecutionTelemetry>>(emptyList())
+    val toolTelemetry: StateFlow<List<ToolExecutionTelemetry>> = _toolTelemetry.asStateFlow()
+
     private val currentUserTurnBuffer = StringBuilder()
     private val currentAssistantTurnBuffer = StringBuilder()
 
@@ -170,6 +182,50 @@ class GeminiLiveSessionManager(
     private var currentOutputLevel = 0f
     private var pendingTextMessage: String? = null
     private var activeSettings: AiSettingsState? = null
+
+    private fun inferModuleName(toolName: String): String {
+        val t = toolName.lowercase()
+        return when {
+            t.contains("news") || t.contains("wiki") || t.contains("search") || t.contains("github") || t.contains("youtube") -> "web_search"
+            t.contains("whatsapp") || t.contains("sms") || t.contains("call") || t.contains("contact") || t.contains("email") -> "comms_bridge"
+            t.contains("camera") || t.contains("screen") || t.contains("vision") || t.contains("click") || t.contains("type") -> "vision_a11y"
+            t.contains("memory") || t.contains("note") || t.contains("artifact") -> "memory_docs"
+            t.contains("skill") || t.contains("routine") || t.contains("autonomous") || t.contains("task") -> "automation"
+            else -> "device_os"
+        }
+    }
+
+    private fun recordTelemetry(entry: ToolExecutionTelemetry) {
+        val current = _toolTelemetry.value.filterNot { it.id == entry.id }
+        _toolTelemetry.value = (listOf(entry) + current).take(16)
+    }
+
+    fun updateActiveSessionOrReconnect(newSettings: AiSettingsState) {
+        val prev = activeSettings
+        activeSettings = newSettings
+        audioPlayer?.volumeGain = newSettings.volumeGain
+        if (!isSessionActive.get() || !isSetupReady.get() || webSocket == null || prev == null) {
+            return
+        }
+        val structuralChange = prev.modelName != newSettings.modelName ||
+            prev.voiceName != newSettings.voiceName ||
+            prev.authMode != newSettings.authMode ||
+            prev.apiKey != newSettings.apiKey ||
+            prev.ephemeralToken != newSettings.ephemeralToken ||
+            prev.proxyEndpoint != newSettings.proxyEndpoint ||
+            prev.systemInstruction != newSettings.systemInstruction
+
+        if (structuralChange) {
+            stopSession()
+            startSession(newSettings)
+        } else if (prev.selectedAgentId != newSettings.selectedAgentId) {
+            val agent = AiAgentRegistry.getAgentById(newSettings.selectedAgentId)
+            sendUserTextMessage(
+                "[System Agent Persona Update: Switch to specialist '${agent.name}' (${agent.titleBengali}). Directives: ${agent.systemPromptExtension}]",
+                newSettings
+            )
+        }
+    }
 
     fun startSession(settings: AiSettingsState) {
         manualStopRequested.set(false)
@@ -448,8 +504,27 @@ class GeminiLiveSessionManager(
                             val name = call.optString("name", "")
                             val args = call.optJSONObject("args") ?: JSONObject()
 
+                            val moduleName = inferModuleName(name)
+                            val telemetryId = "${callId}_${System.currentTimeMillis()}"
+                            val startMs = System.currentTimeMillis()
+                            recordTelemetry(
+                                ToolExecutionTelemetry(
+                                    id = telemetryId,
+                                    toolName = name,
+                                    module = moduleName,
+                                    durationMs = 0L,
+                                    status = "RUNNING"
+                                )
+                            )
+
                             val job = async {
-                                toolExecutor.executeTool(name, args)
+                                JarvisMasterOrchestrator.orchestrateToolCall(
+                                    context = context,
+                                    toolName = name,
+                                    args = args,
+                                    caller = "gemini_live_voice",
+                                    toolExecutor = toolExecutor
+                                )
                             }
                             inFlightToolJobs[callId] = job
                             val result = try {
@@ -457,6 +532,22 @@ class GeminiLiveSessionManager(
                             } finally {
                                 inFlightToolJobs.remove(callId)
                             }
+                            val duration = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
+                            val telStatus = when {
+                                result.optString("status") == "PERMISSION_REQUIRED" -> "PERMISSION_REQUIRED"
+                                result.optString("status") == "CONFIRMATION_REQUIRED" -> "CONFIRMATION_REQUIRED"
+                                result.optBoolean("success", false) -> "SUCCEEDED"
+                                else -> "FAILED"
+                            }
+                            recordTelemetry(
+                                ToolExecutionTelemetry(
+                                    id = telemetryId,
+                                    toolName = name,
+                                    module = moduleName,
+                                    durationMs = duration,
+                                    status = telStatus
+                                )
+                            )
 
                             val respObj = JSONObject().apply {
                                 put("id", callId)

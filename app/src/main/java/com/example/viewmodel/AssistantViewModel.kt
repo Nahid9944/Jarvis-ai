@@ -151,6 +151,8 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     fun selectAiAgent(agent: AiAgent) {
         _activeAiAgent.value = agent
         aiSettingsRepo.setSelectedAgentId(agent.id)
+        JarvisMasterOrchestrator.setUserSelectedAgent(agent)
+        liveSessionManager.updateActiveSessionOrReconnect(aiSettings.value.copy(selectedAgentId = agent.id))
     }
 
     fun toggleLocationSharing(enabled: Boolean) {
@@ -502,6 +504,114 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     val liveInputTranscript: StateFlow<String> = liveSessionManager.latestInputTranscript
     val liveOutputTranscript: StateFlow<String> = liveSessionManager.latestOutputTranscript
+    val toolTelemetry: StateFlow<List<ToolExecutionTelemetry>> = liveSessionManager.toolTelemetry
+
+    // Real News Feed & HUD Auto-Open Event State
+    private val _liveNews = MutableStateFlow<List<NewsItem>>(emptyList())
+    val liveNews: StateFlow<List<NewsItem>> = _liveNews.asStateFlow()
+    private val _isNewsLoading = MutableStateFlow(false)
+    val isNewsLoading: StateFlow<Boolean> = _isNewsLoading.asStateFlow()
+    private val _newsError = MutableStateFlow<String?>(null)
+    val newsError: StateFlow<String?> = _newsError.asStateFlow()
+
+    val openHeadlinesEvent: SharedFlow<List<NewsItem>> = JarvisHudEventBus.openHeadlinesEvents
+    val closeHeadlinesEvent: SharedFlow<Unit> = JarvisHudEventBus.closeHeadlinesEvents
+    val inlineCameraToggleEvent: SharedFlow<Boolean?> = JarvisHudEventBus.inlineCameraToggleEvents
+    val cameraLensChangedEvent: SharedFlow<Int> = JarvisHudEventBus.cameraLensChangedEvents
+
+    fun refreshLiveNews(category: String = "সব", forceRefresh: Boolean = false) {
+        viewModelScope.launch {
+            _isNewsLoading.value = true
+            _newsError.value = null
+            val items = NewsAndRegulatoryService.getLiveNews(category = category, forceRefresh = forceRefresh)
+            _liveNews.value = items
+            if (items.isEmpty()) {
+                _newsError.value = "লাইভ নিউজ ফিড পাওয়া যায়নি (অফলাইন বা নেটওয়ার্ক সীমিত)"
+            }
+            _isNewsLoading.value = false
+        }
+    }
+
+    // Persistent Artifact Workspace
+    val allArtifacts: StateFlow<List<ArtifactEntity>> = dao.getAllArtifacts()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    fun saveArtifact(
+        id: Long = 0L,
+        title: String,
+        content: String,
+        format: String = "MARKDOWN",
+        category: String = "DOCUMENT",
+        onDone: (Long) -> Unit = {}
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            val cleanTitle = title.trim().ifBlank { "শিরোনামহীন নোট" }
+            val ext = when (format.uppercase()) {
+                "JSON" -> "json"
+                "CODE" -> "txt"
+                "TEXT" -> "txt"
+                else -> "md"
+            }
+            val artifactsDir = java.io.File(getApplication<Application>().filesDir, "artifacts").apply { mkdirs() }
+            val safeName = cleanTitle.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(40).ifBlank { "artifact" }
+            val targetFile = java.io.File(artifactsDir, "${safeName}_$now.$ext")
+            try {
+                targetFile.writeText(content)
+            } catch (_: Exception) {
+            }
+            val existing = if (id > 0L) dao.getArtifactByIdSync(id) else null
+            val entity = ArtifactEntity(
+                id = if (existing != null) id else 0L,
+                title = cleanTitle,
+                content = content,
+                format = format.uppercase(),
+                category = category.uppercase(),
+                filePath = if (targetFile.exists()) targetFile.absolutePath else (existing?.filePath ?: ""),
+                createdAt = existing?.createdAt ?: now,
+                updatedAt = now
+            )
+            val savedId = dao.insertArtifact(entity)
+            withContext(Dispatchers.Main) {
+                onDone(savedId)
+            }
+        }
+    }
+
+    fun deleteArtifact(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val existing = dao.getArtifactByIdSync(id)
+            if (existing != null && existing.filePath.isNotBlank()) {
+                try {
+                    java.io.File(existing.filePath).delete()
+                } catch (_: Exception) {
+                }
+            }
+            dao.deleteArtifact(id)
+        }
+    }
+
+    fun exportArtifactToFile(context: android.content.Context, artifact: ArtifactEntity): Result<android.net.Uri> {
+        return try {
+            val ext = when (artifact.format.uppercase()) {
+                "JSON" -> "json"
+                "TEXT", "CODE" -> "txt"
+                else -> "md"
+            }
+            val dir = java.io.File(context.filesDir, "artifacts").apply { mkdirs() }
+            val safeName = artifact.title.replace(Regex("[^a-zA-Z0-9._-]"), "_").take(40).ifBlank { "artifact" }
+            val file = java.io.File(dir, "${safeName}_${artifact.id}.$ext")
+            file.writeText(artifact.content)
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            Result.success(uri)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
 
     // Companion Personality, Emotion, Full-Duplex Interruption & Orchestrator StateFlows
     val activePersonality: StateFlow<JarvisPersonalityMode> = JarvisPersonalityManager.currentMode
@@ -583,6 +693,17 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                         )
                         pendingVoiceUserTurn = ""
                     }
+                }
+            }
+        }
+
+        // Sync live news fetched by Gemini Live tools directly into HUD state
+        viewModelScope.launch {
+            JarvisHudEventBus.openHeadlinesEvents.collect { freshNews ->
+                if (freshNews.isNotEmpty()) {
+                    _liveNews.value = freshNews
+                    _newsError.value = null
+                    _isNewsLoading.value = false
                 }
             }
         }
@@ -723,6 +844,10 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         return ActionApprovalRegistry.setTrustedLowRiskRule(toolName, scopeDescriptionBn, enabled)
     }
 
+    fun cancelPendingOsAction() {
+        com.example.permissions.JarvisPermissionManager.cancelPendingOsAction(getApplication())
+    }
+
     fun clearRevokedNotices() = JarvisPermissionManager.clearRevokedNotices()
 
     fun clearLastAutoResumeResult() = JarvisPermissionManager.clearLastAutoResumeResult()
@@ -765,6 +890,25 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         )
     }
 
+    fun executeHudShortcutTool(
+        toolName: String,
+        args: org.json.JSONObject = org.json.JSONObject(),
+        onResult: (org.json.JSONObject) -> Unit = {}
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = JarvisMasterOrchestrator.orchestrateToolCall(
+                context = getApplication(),
+                toolName = toolName,
+                args = args,
+                caller = "archer_hud_shortcut",
+                toolExecutor = assistantToolExecutor
+            )
+            withContext(Dispatchers.Main) {
+                onResult(result)
+            }
+        }
+    }
+
     fun captureCameraVisionFrame() {
         viewModelScope.launch {
             JarvisCameraVisionCoordinator.captureAndStreamVisualContext(getApplication())
@@ -797,9 +941,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
                     skillNameBengali = skillName,
                     triggerPhrases = listOf(triggerPhrase),
                     stepsInstructions = naturalLanguageSteps,
-                    repository = jarvisSkillRepo
+                    repository = jarvisSkillRepo,
+                    geminiApiKey = aiSettings.value.apiKey
                 )
-                onDone(true, "'${created.nameBengali}' (v${created.version}) সফলভাবে শেখানো হয়েছে!")
+                val msg = if (created.status == "DRAFT") {
+                    "'${created.nameBengali}' খসড়া (DRAFT) হিসেবে সংরক্ষিত — অ্যাক্টিভ করতে স্পষ্ট Action ধাপ লিখুন।"
+                } else {
+                    "'${created.nameBengali}' (v${created.version}) সফলভাবে শেখানো হয়েছে!"
+                }
+                onDone(true, msg)
             } catch (e: Exception) {
                 onDone(false, e.message ?: "স্কিল সংরক্ষণে ত্রুটি")
             }
@@ -867,6 +1017,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             ephemeralToken = newSettings.ephemeralToken,
             proxyEndpoint = newSettings.proxyEndpoint
         )
+        liveSessionManager.updateActiveSessionOrReconnect(aiSettingsRepo.settingsState.value)
     }
 
     fun resetAiSettings() {
@@ -897,21 +1048,25 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     suspend fun executeNlpCommand(commandText: String, onPromptAccessibility: () -> Unit = {}): JarvisExecutionResult = withContext(Dispatchers.IO) {
         val parsed = JarvisNlpCommandParser.parse(commandText)
-        val outcome = VoiceCommandUnderstandingEngine.processCommand(
+        val orchestrated = JarvisMasterOrchestrator.orchestrate(
             context = getApplication(),
-            rawCommand = commandText,
-            onPromptAccessibility = onPromptAccessibility,
+            utterance = commandText,
             toolExecutor = assistantToolExecutor,
-            onNavigate = { screen -> _navigationCommand.tryEmit(screen) },
             caller = "user_ui"
         )
+        val needsA11y = orchestrated.executedSteps.any { it.permissionRequired == "accessibility" }
+        val needsLoc = orchestrated.executedSteps.any { it.permissionRequired in setOf("location", "location_fine") }
+        val needsScreen = orchestrated.executedSteps.any { it.permissionRequired == "screen_capture" }
+        if (needsA11y) {
+            withContext(Dispatchers.Main) { onPromptAccessibility() }
+        }
         JarvisExecutionResult(
-            success = outcome.success,
-            feedbackMessage = outcome.feedbackMessage,
+            success = orchestrated.success,
+            feedbackMessage = orchestrated.summaryBengali,
             command = parsed,
-            needsAccessibilityPermission = outcome.needsAccessibility,
-            needsLocationPermission = outcome.needsLocation,
-            needsScreenSharingPrompt = outcome.needsScreenSharing
+            needsAccessibilityPermission = needsA11y,
+            needsLocationPermission = needsLoc,
+            needsScreenSharingPrompt = needsScreen
         )
     }
 

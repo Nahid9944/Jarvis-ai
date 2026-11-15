@@ -794,7 +794,8 @@ fun JarvisToolsTab(
                         )
                     } else {
                         learnedSkills.take(8).forEach { skill ->
-                            val isEnabled = skill.status.equals("ACTIVE", ignoreCase = true)
+                            val isDraft = skill.status.equals("DRAFT", ignoreCase = true) || skill.stepCount <= 0
+                            val isEnabled = !isDraft && skill.status.equals("ACTIVE", ignoreCase = true)
                             val primaryTrigger = remember(skill.triggerPhrasesJson) {
                                 try {
                                     org.json.JSONArray(skill.triggerPhrasesJson).optString(0).ifBlank { skill.name }
@@ -809,7 +810,14 @@ fun JarvisToolsTab(
                             Surface(
                                 color = SpaceSurface,
                                 shape = RoundedCornerShape(12.dp),
-                                border = BorderStroke(1.dp, if (isEnabled) CyanNeon.copy(alpha = 0.35f) else Color(0xFF334155)),
+                                border = BorderStroke(
+                                    1.dp,
+                                    when {
+                                        isDraft -> AmberGlow.copy(alpha = 0.5f)
+                                        isEnabled -> CyanNeon.copy(alpha = 0.35f)
+                                        else -> Color(0xFF334155)
+                                    }
+                                ),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(
@@ -822,14 +830,33 @@ fun JarvisToolsTab(
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
                                         Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = "${skill.nameBengali} (v${skill.version})",
-                                                color = TextWhite,
-                                                fontWeight = FontWeight.Bold,
-                                                fontSize = 12.5.sp,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
-                                            )
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                Text(
+                                                    text = "${skill.nameBengali} (v${skill.version})",
+                                                    color = TextWhite,
+                                                    fontWeight = FontWeight.Bold,
+                                                    fontSize = 12.5.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    modifier = Modifier.weight(1f, fill = false)
+                                                )
+                                                Surface(
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = if (isDraft) AmberGlow.copy(alpha = 0.16f) else EmeraldNeon.copy(alpha = 0.16f),
+                                                    border = BorderStroke(1.dp, if (isDraft) AmberGlow else EmeraldNeon)
+                                                ) {
+                                                    Text(
+                                                        text = if (isDraft) "DRAFT (অসম্পূর্ণ)" else "ACTIVE • ${skill.stepCount} ধাপ",
+                                                        color = if (isDraft) AmberGlow else EmeraldNeon,
+                                                        fontSize = 9.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                                    )
+                                                }
+                                            }
                                             Text(
                                                 text = "ট্রিগার: $primaryTrigger • ${skill.sourceType}",
                                                 color = CyanNeon,
@@ -840,7 +867,14 @@ fun JarvisToolsTab(
                                         }
                                         Switch(
                                             checked = isEnabled,
-                                            onCheckedChange = { viewModel.toggleSkillEnabled(skill.skillId, it) },
+                                            enabled = !isDraft,
+                                            onCheckedChange = {
+                                                if (!isDraft) {
+                                                    viewModel.toggleSkillEnabled(skill.skillId, it)
+                                                } else {
+                                                    Toast.makeText(context, "০-ধাপের খসড়া স্কিল সক্রিয় করা যাবে না", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
                                             colors = SwitchDefaults.colors(
                                                 checkedThumbColor = SpaceDark,
                                                 checkedTrackColor = CyanNeon
@@ -854,11 +888,17 @@ fun JarvisToolsTab(
                                     ) {
                                         OutlinedButton(
                                             onClick = { onAskJarvis(primaryTrigger) },
-                                            border = BorderStroke(1.dp, EmeraldNeon),
+                                            enabled = !isDraft,
+                                            border = BorderStroke(1.dp, if (isDraft) TextDim.copy(alpha = 0.4f) else EmeraldNeon),
                                             shape = RoundedCornerShape(8.dp),
                                             modifier = Modifier.weight(1f)
                                         ) {
-                                            Text("চালান", color = EmeraldNeon, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                            Text(
+                                                text = if (isDraft) "খসড়া" else "চালান",
+                                                color = if (isDraft) TextDim else EmeraldNeon,
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
                                         }
 
                                         if (hasPreviousVersion) {

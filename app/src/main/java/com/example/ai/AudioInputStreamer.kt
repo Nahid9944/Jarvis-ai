@@ -52,8 +52,14 @@ class AudioInputStreamer(
             }
         }
 
+        if (!com.example.audio.MicrophoneCoordinator.tryAcquire(com.example.audio.MicOwner.GEMINI_LIVE_STREAM, preempt = true)) {
+            onError("মাইক্রোফোন বর্তমানে অন্য একটি সক্রিয় সেশনে ব্যবহৃত হচ্ছে")
+            return false
+        }
+
         val minBufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
         if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE || minBufferSize <= 0) {
+            com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.GEMINI_LIVE_STREAM)
             onError("মাইক্রোফোন বাফার সাইজ নির্ধারণে ত্রুটি")
             return false
         }
@@ -174,6 +180,7 @@ class AudioInputStreamer(
             // ignore
         }
         audioRecord = null
+        com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.GEMINI_LIVE_STREAM)
     }
 
     private fun calculateRmsLevel(bytes: ByteArray): Float {

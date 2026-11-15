@@ -19,6 +19,14 @@ object PermissionOrchestrator {
     private val _grantedMap = MutableStateFlow<Map<String, Boolean>>(emptyMap())
     val grantedMap: StateFlow<Map<String, Boolean>> = _grantedMap.asStateFlow()
 
+    @Volatile
+    var sessionPermissionHandler: ((Context, PermissionSpec) -> Unit)? = null
+        private set
+
+    fun setSessionPermissionHandler(handler: ((Context, PermissionSpec) -> Unit)?) {
+        sessionPermissionHandler = handler
+    }
+
     fun request(
         spec: PermissionSpec,
         reason: String? = null,

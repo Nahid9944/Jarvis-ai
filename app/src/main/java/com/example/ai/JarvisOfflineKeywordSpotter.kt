@@ -101,6 +101,7 @@ class JarvisOfflineKeywordSpotter(
         isPausedForLiveMic.set(true)
         _isListening.value = false
         _audioRmsEnergy.value = 0f
+        com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.OFFLINE_SPOTTER)
         mainHandler.post {
             mainHandler.removeCallbacksAndMessages(null)
             destroyRecognizerOnMain()
@@ -129,6 +130,7 @@ class JarvisOfflineKeywordSpotter(
         isPausedForLiveMic.set(false)
         _isListening.value = false
         _audioRmsEnergy.value = 0f
+        com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.OFFLINE_SPOTTER)
         mainHandler.post {
             mainHandler.removeCallbacksAndMessages(null)
             destroyRecognizerOnMain()
@@ -155,7 +157,13 @@ class JarvisOfflineKeywordSpotter(
                 return@post
             }
 
+            if (!com.example.audio.MicrophoneCoordinator.tryAcquire(com.example.audio.MicOwner.OFFLINE_SPOTTER, preempt = false)) {
+                _isListening.value = false
+                return@post
+            }
+
             if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+                com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.OFFLINE_SPOTTER)
                 Log.w(TAG, "SpeechRecognizer unavailable on this device.")
                 _isListening.value = false
                 return@post

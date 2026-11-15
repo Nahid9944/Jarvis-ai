@@ -17,7 +17,7 @@ import org.json.JSONObject
 import java.util.Locale
 
 /**
- * 5-Personality Character System inspired by STONIC AI & Maya (মায়া):
+ * 5-Personality Character System for NAHID AI (J.A.R.V.I.S.):
  * 1. ROMANTIC: Romantic companion with sweet addressing, gentle warmth, loving care and emotional attentiveness.
  * 2. BEST_FRIEND: Friendly, energetic, playful, honest advice, everyday companion.
  * 3. EMOTIONAL_COMFORT: Empathetic, gentle, patient, validating and deeply comforting during sorrow, stress or anxiety.
@@ -300,7 +300,7 @@ object JarvisPersonalityManager {
             lower.contains("রোমান্টিক") || lower.contains("romantic") -> JarvisPersonalityMode.ROMANTIC
             lower.contains("বেস্ট ফ্রেন্ড") || lower.contains("ফ্রেন্ড মোড") || lower.contains("বন্ধু মোড") || lower.contains("best friend") -> JarvisPersonalityMode.BEST_FRIEND
             lower.contains("কমফোর্ট") || lower.contains("সান্ত্বনা") || lower.contains("comfort mode") -> JarvisPersonalityMode.EMOTIONAL_COMFORT
-            lower.contains("প্রফেশনাল") || lower.contains("professional mode") || lower.contains("জারভিস মোড") || lower.contains("মায়া প্রফেশনাল") -> JarvisPersonalityMode.PROFESSIONAL
+            lower.contains("প্রফেশনাল") || lower.contains("professional mode") || lower.contains("জারভিস মোড") || lower.contains("jarvis professional") -> JarvisPersonalityMode.PROFESSIONAL
             lower.contains("প্লেফুল") || lower.contains("মজাদার মোড") || lower.contains("playful mode") || lower.contains("চঞ্চল মোড") -> JarvisPersonalityMode.PLAYFUL
             else -> null
         }
@@ -421,7 +421,7 @@ object JarvisPersonalityManager {
 
         val base = when (mode) {
             JarvisPersonalityMode.ROMANTIC -> """
-[ACTIVE COMPANION PERSONALITY: ROMANTIC COMPANION (রোমান্টিক সঙ্গিনী — মায়া)]:
+[ACTIVE COMPANION PERSONALITY: ROMANTIC COMPANION (রোমান্টিক সঙ্গিনী — নাহিদ এআই)]:
 - Speaking Style: ${profile.speakingStyleBn}
 - Tone & Voice: ${profile.toneDescriptionBn}. Affection=${profile.affectionLevel}/10, ResponseLength=${profile.responseLength}.
 - Addressing: Address the user lovingly using terms like "তুমি", "প্রিয়", or their preferred name with gentle warmth.
@@ -432,7 +432,7 @@ object JarvisPersonalityManager {
 """.trimIndent()
 
             JarvisPersonalityMode.BEST_FRIEND -> """
-[ACTIVE COMPANION PERSONALITY: BEST FRIEND (বেস্ট ফ্রেন্ড — মায়া)]:
+[ACTIVE COMPANION PERSONALITY: BEST FRIEND (বেস্ট ফ্রেন্ড — নাহিদ এআই)]:
 - Speaking Style: ${profile.speakingStyleBn}
 - Tone & Voice: ${profile.toneDescriptionBn}. Humor=${profile.humorLevel}/10, ResponseLength=${profile.responseLength}.
 - Addressing: Address the user naturally like a close trusted buddy ("দোস্ত", "বন্ধু").
@@ -442,7 +442,7 @@ object JarvisPersonalityManager {
 """.trimIndent()
 
             JarvisPersonalityMode.EMOTIONAL_COMFORT -> """
-[ACTIVE COMPANION PERSONALITY: EMOTIONAL COMFORT (মানসিক সান্ত্বনা — মায়া)]:
+[ACTIVE COMPANION PERSONALITY: EMOTIONAL COMFORT (মানসিক সান্ত্বনা — নাহিদ এআই)]:
 - Speaking Style: ${profile.speakingStyleBn}
 - Tone & Voice: ${profile.toneDescriptionBn}. Affection=${profile.affectionLevel}/10, ResponseLength=${profile.responseLength}.
 - Addressing: Address the user softly and patiently.
@@ -452,7 +452,7 @@ object JarvisPersonalityManager {
 """.trimIndent()
 
             JarvisPersonalityMode.PROFESSIONAL -> """
-[ACTIVE COMPANION PERSONALITY: PROFESSIONAL J.A.R.V.I.S. / MAYA (পেশাদার)]:
+[ACTIVE COMPANION PERSONALITY: PROFESSIONAL J.A.R.V.I.S. (পেশাদার)]:
 - Speaking Style: ${profile.speakingStyleBn}
 - Tone & Voice: ${profile.toneDescriptionBn}. Formality=${profile.formalityLevel}/10, ResponseLength=${profile.responseLength}.
 - Addressing: Address the user respectfully as 'Sir' (বা স্যার).
@@ -461,7 +461,7 @@ object JarvisPersonalityManager {
 """.trimIndent()
 
             JarvisPersonalityMode.PLAYFUL -> """
-[ACTIVE COMPANION PERSONALITY: PLAYFUL COMPANION (চঞ্চল ও মজাদার — মায়া)]:
+[ACTIVE COMPANION PERSONALITY: PLAYFUL COMPANION (চঞ্চল ও মজাদার — নাহিদ এআই)]:
 - Speaking Style: ${profile.speakingStyleBn}
 - Tone & Voice: ${profile.toneDescriptionBn}. Humor=${profile.humorLevel}/10, ResponseLength=${profile.responseLength}.
 - Characteristics:

@@ -112,8 +112,8 @@ class JarvisBackgroundService : Service() {
         )
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("J.A.R.V.I.S. Neural OS সক্রিয়")
-            .setContentText("আয়রন ম্যান জারভিস ব্যাকগ্রাউন্ড মোড চালু আছে — স্যার, আমি প্রস্তুত...")
+            .setContentTitle("NAHID AI • লাইভ ভয়েস সক্রিয়")
+            .setContentText("নাহিদ এআই ব্যাকগ্রাউন্ডে সক্রিয় — অন্যান্য অ্যাপে গেলেও কমান্ড শুনছে...")
             .setSmallIcon(R.drawable.ic_jarvis_logo)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)

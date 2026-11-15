@@ -146,10 +146,16 @@ class JarvisSkillRecorder(
             return extractParameterNames(steps).filterNot { it.lowercase() in SYSTEM_PARAMS }
         }
 
+        private val ALLOWED_ACTION_TYPES = setOf(
+            "OPEN_APP", "CLICK", "INPUT_TEXT", "SCROLL_FORWARD", "SCROLL_BACKWARD",
+            "BACK", "HOME", "WAIT", "WAIT_FOR_ELEMENT", "VERIFY_TEXT"
+        )
+
         /**
          * Voice / Natural-Language Teach Mode for non-programmers.
          * Converts Bengali/Banglish/English step instructions into a persisted,
          * parameterized JarvisSkillEntity + steps without touching code or accessibility recording.
+         * Marks 0-step skills honestly as DRAFT rather than fake-ACTIVE.
          */
         suspend fun teachSkillFromNaturalLanguage(
             skillName: String,
@@ -157,9 +163,17 @@ class JarvisSkillRecorder(
             triggerPhrases: List<String> = emptyList(),
             stepsInstructions: String,
             targetPackageName: String = "",
-            repository: JarvisSkillRepository
+            repository: JarvisSkillRepository,
+            geminiApiKey: String = ""
         ): JarvisSkillEntity = withContext(Dispatchers.IO) {
-            val parsedSteps = YouTubeTutorialImporter.extractActionStepsFromText(stepsInstructions)
+            var parsedSteps = YouTubeTutorialImporter.extractActionStepsFromText(stepsInstructions)
+                .filter { it.actionType in ALLOWED_ACTION_TYPES }
+
+            if (parsedSteps.isEmpty() && geminiApiKey.isNotBlank()) {
+                parsedSteps = synthesizeStepsWithGemini(geminiApiKey, stepsInstructions)
+                    .filter { it.actionType in ALLOWED_ACTION_TYPES }
+            }
+
             val skillId = "teach_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
             val stepEntities = parsedSteps.mapIndexed { idx, s ->
                 s.copy(skillId = skillId, stepIndex = idx + 1)
@@ -185,12 +199,17 @@ class JarvisSkillRecorder(
                 if (skillName.isNotBlank() && skillName != skillNameBengali) put(skillName)
                 triggerPhrases.distinct().filter { it.isNotBlank() }.forEach { put(it) }
             }
+            val computedStatus = if (stepEntities.isEmpty()) "DRAFT" else "ACTIVE"
 
             val entity = JarvisSkillEntity(
                 skillId = skillId,
                 name = skillName.ifBlank { "Taught Skill" },
                 nameBengali = skillNameBengali.ifBlank { skillName.ifBlank { "শেখানো কাজ" } },
-                description = "ভয়েস বা সাধারণ নির্দেশনার মাধ্যমে শেখানো দক্ষতা",
+                description = if (computedStatus == "DRAFT") {
+                    "ধাপ সনাক্ত করা যায়নি (খসড়া) — স্পষ্ট Action লিখুন"
+                } else {
+                    "ভয়েস বা সাধারণ নির্দেশনার মাধ্যমে শেখানো দক্ষতা"
+                },
                 triggerPhrasesJson = triggers.toString(),
                 targetPackageName = inferredPkg,
                 targetAppName = inferredPkg.substringAfterLast('.'),
@@ -201,12 +220,74 @@ class JarvisSkillRecorder(
                 stepsJson = stepsJsonArray.toString(),
                 stepCount = stepEntities.size,
                 sourceType = "VOICE_TEACHING",
-                status = "ACTIVE",
+                status = computedStatus,
                 version = 1,
                 parametersSchemaJson = JSONArray(paramNames).toString()
             )
             repository.saveSkillWithSteps(entity, stepEntities)
             entity
+        }
+
+        private fun synthesizeStepsWithGemini(apiKey: String, instructions: String): List<JarvisSkillStepEntity> {
+            return try {
+                val url = java.net.URL(
+                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey.trim()}"
+                )
+                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    connectTimeout = 5000
+                    readTimeout = 7000
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                }
+                val prompt = "Convert these Android UI automation instructions into a pure JSON array of objects with fields: actionType (one of OPEN_APP,CLICK,INPUT_TEXT,SCROLL_FORWARD,SCROLL_BACKWARD,BACK,HOME,WAIT), targetText, targetViewId, inputPayload, descriptionBn. Return ONLY the JSON array. Instructions: $instructions"
+                val reqBody = JSONObject().apply {
+                    put("contents", JSONArray().put(JSONObject().apply {
+                        put("parts", JSONArray().put(JSONObject().put("text", prompt)))
+                    }))
+                }
+                conn.outputStream.use { it.write(reqBody.toString().toByteArray(Charsets.UTF_8)) }
+                if (conn.responseCode !in 200..299) {
+                    conn.disconnect()
+                    return emptyList()
+                }
+                val body = conn.inputStream.bufferedReader().use { it.readText() }
+                conn.disconnect()
+                val text = JSONObject(body)
+                    .optJSONArray("candidates")
+                    ?.optJSONObject(0)
+                    ?.optJSONObject("content")
+                    ?.optJSONArray("parts")
+                    ?.optJSONObject(0)
+                    ?.optString("text", "")
+                    ?.trim()
+                    .orEmpty()
+                val startIdx = text.indexOf('[')
+                val endIdx = text.lastIndexOf(']')
+                if (startIdx < 0 || endIdx <= startIdx) return emptyList()
+                val arr = JSONArray(text.substring(startIdx, endIdx + 1))
+                val out = mutableListOf<JarvisSkillStepEntity>()
+                for (i in 0 until arr.length().coerceAtMost(12)) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val act = o.optString("actionType", "").uppercase()
+                    if (act !in ALLOWED_ACTION_TYPES) continue
+                    out.add(
+                        JarvisSkillStepEntity(
+                            skillId = "",
+                            stepIndex = out.size + 1,
+                            actionType = act,
+                            targetText = o.optString("targetText").ifBlank { null },
+                            targetViewId = o.optString("targetViewId").ifBlank { null },
+                            inputPayload = o.optString("inputPayload").ifBlank { null },
+                            descriptionBengali = o.optString("descriptionBn", act),
+                            delayAfterMs = 600L
+                        )
+                    )
+                }
+                out
+            } catch (_: Exception) {
+                emptyList()
+            }
         }
     }
 

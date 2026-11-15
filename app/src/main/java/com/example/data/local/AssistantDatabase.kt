@@ -29,9 +29,10 @@ import kotlinx.coroutines.launch
         CharacterProfileVersionEntity::class,
         EmotionHistoryEntity::class,
         ActionApprovalAuditEntity::class,
-        TrustedLowRiskRuleEntity::class
+        TrustedLowRiskRuleEntity::class,
+        ArtifactEntity::class
     ],
-    version = 19,
+    version = 20,
     exportSchema = false
 )
 abstract class AssistantDatabase : RoomDatabase() {
@@ -218,6 +219,25 @@ abstract class AssistantDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_19_20 = object : androidx.room.migration.Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS artifacts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        format TEXT NOT NULL DEFAULT 'MARKDOWN',
+                        category TEXT NOT NULL DEFAULT 'DOCUMENT',
+                        filePath TEXT NOT NULL DEFAULT '',
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         @androidx.annotation.VisibleForTesting
         fun resetInstanceForTest() {
             synchronized(this) {
@@ -236,7 +256,7 @@ abstract class AssistantDatabase : RoomDatabase() {
                     AssistantDatabase::class.java,
                     DatabaseMigrationHelper.NEW_DB_NAME
                 )
-                .addMigrations(MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19)
+                .addMigrations(MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20)
                 .addCallback(object : RoomDatabase.Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)

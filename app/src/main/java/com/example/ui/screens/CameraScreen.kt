@@ -344,7 +344,7 @@ fun CameraScreen(
 
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
                 Text(
-                    text = if (mode == CameraMode.TEXT_OCR_SCAN) "OCR SCANNER" else "MAYA OPTICAL VISION",
+                    text = if (mode == CameraMode.TEXT_OCR_SCAN) "OCR SCANNER" else "J.A.R.V.I.S. OPTICAL VISION",
                     color = CyanNeon,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 13.sp,

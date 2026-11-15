@@ -29,6 +29,7 @@ class JarvisRoutineEngine(
     suspend fun executeRoutine(routineName: String): RoutineResult = withContext(Dispatchers.IO) {
         val normalized = routineName.trim().lowercase(Locale.ROOT)
         when {
+            normalized.contains("briefing") || normalized.contains("ব্রিফিং") -> generateDailyBriefing(routineName)
             normalized.contains("morning") || normalized.contains("সকাল") -> runMorningRoutine()
             normalized.contains("office") || normalized.contains("অফিস") -> runOfficeRoutine()
             normalized.contains("night") || normalized.contains("রাত") || normalized.contains("sleep") -> runNightRoutine()
@@ -36,7 +37,27 @@ class JarvisRoutineEngine(
         }
     }
 
-    private suspend fun runMorningRoutine(): RoutineResult {
+    suspend fun generateDailyBriefing(requestedSlot: String = ""): RoutineResult = withContext(Dispatchers.IO) {
+        val cal = java.util.Calendar.getInstance()
+        val hour = cal.get(java.util.Calendar.HOUR_OF_DAY)
+        val slotHint = requestedSlot.trim().lowercase(Locale.ROOT)
+        val isEvening = slotHint.contains("evening") || slotHint.contains("সন্ধ্যা") || (slotHint.isBlank() && hour in 17..20)
+        val isNight = slotHint.contains("night") || slotHint.contains("রাত") || (slotHint.isBlank() && (hour >= 21 || hour < 5))
+        val isAfternoon = slotHint.contains("afternoon") || slotHint.contains("দুপুর") || (slotHint.isBlank() && hour in 12..16)
+
+        val greeting = when {
+            isEvening -> "শুভ সন্ধ্যা, স্যার।"
+            isNight -> "শুভ রাত্রি, স্যার।"
+            isAfternoon -> "শুভ দুপুর, স্যার।"
+            else -> "শুভ সকাল, স্যার।"
+        }
+        val titleEn = when {
+            isEvening -> "Evening Briefing"
+            isNight -> "Night Briefing"
+            isAfternoon -> "Afternoon Briefing"
+            else -> "Morning Briefing"
+        }
+
         val dateFormat = SimpleDateFormat("EEEE, dd MMMM yyyy, hh:mm a", Locale("bn", "BD"))
         val currentDateTime = dateFormat.format(Date())
 
@@ -45,53 +66,66 @@ class JarvisRoutineEngine(
         val batteryText = if (rawBattery in 0..100) "$rawBattery%" else "UNKNOWN"
 
         val weatherInfo = try {
-            val w = com.example.ai.WeatherService.fetchWeather("Dhaka")
+            val w = WeatherService.fetchWeather("Dhaka")
             w.fullSummaryBengali
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             "আবহাওয়া তথ্য লোড করা যায়নি"
         }
 
         val tasks = try {
             dao.getAllAiTasksSync().filter { it.status == "PENDING" }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             emptyList()
         }
 
         val taskCount = tasks.size
         val taskSummary = if (taskCount > 0) {
-            "আজকের জন্য $taskCount টি শিডিউলড প্রোটোকল/টাস্ক নির্ধারিত আছে।"
+            val preview = tasks.take(3).joinToString(", ") { it.title }
+            "আপনার $taskCount টি পেন্ডিং টাস্ক বাকি আছে ($preview)।"
         } else {
-            "আজকের জন্য কোনো পেন্ডিং টাস্ক নেই, স্যার।"
+            "আজকের জন্য কোনো পেন্ডিং টাস্ক বাকি নেই, স্যার।"
         }
 
         val notifs = JarvisNotificationListenerService.getActiveNotificationsList()
         val notifCount = notifs.size
         val notifSummary = if (notifCount > 0) {
-            "রাতে মোট $notifCount টি আনরিড নোটিফিকেশন জমা হয়েছে।"
+            "সর্বশেষ $notifCount টি আনরিড নোটিফিকেশন রয়েছে।"
         } else {
-            "কোনো জরুরি মিসড নোটিফিকেশন নেই।"
+            "কোনো নতুন জরুরি নোটিফিকেশন নেই।"
+        }
+
+        val cachedNews = com.example.ai.NewsAndRegulatoryService.getRecentNews("সব")
+            .ifEmpty { com.example.ai.NewsAndRegulatoryService.getRecentNews("প্রযুক্তি ও এআই") }
+        val newsSummary = if (cachedNews.isNotEmpty()) {
+            "প্রধান শিরোনাম: ${cachedNews.take(2).joinToString(" | ") { it.title }}।"
+        } else {
+            ""
         }
 
         val speech = buildString {
-            append("শুভ সকাল, স্যার। ")
-            append("আজ $currentDateTime। ")
-            append("ডিভাইস ব্যাটারি $batteryText চার্জড। ")
-            append("বর্তমান আবহাওয়া: $weatherInfo। ")
+            append("$greeting ")
+            append("এখন $currentDateTime। ")
+            append("ফোনের ব্যাটারি $batteryText চার্জ আছে। ")
+            append("আবহাওয়া: $weatherInfo। ")
             append("$taskSummary ")
             append("$notifSummary ")
-            append("আপনার দিনটি চমৎকার ও ফলপ্রসূ হোক।")
-        }
+            if (newsSummary.isNotBlank()) append(newsSummary)
+        }.trim()
 
-        return RoutineResult(
-            routineName = "Morning Briefing",
+        RoutineResult(
+            routineName = titleEn,
             summaryBengali = speech,
+            success = true,
             details = mapOf(
                 "battery" to batteryText,
                 "pendingTasks" to taskCount,
-                "notifications" to notifCount
+                "notifications" to notifCount,
+                "headlinesCount" to cachedNews.size
             )
         )
     }
+
+    private suspend fun runMorningRoutine(): RoutineResult = generateDailyBriefing("Morning")
 
     private suspend fun runOfficeRoutine(): RoutineResult {
         val tasks = try {

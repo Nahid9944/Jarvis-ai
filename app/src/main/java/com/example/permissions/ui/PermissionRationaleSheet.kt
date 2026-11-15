@@ -19,6 +19,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -81,6 +82,7 @@ fun PermissionRationaleSheet(
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp, vertical = 12.dp)
                 .navigationBarsPadding()
+                .testTag("permission_rationale_sheet")
         ) {
             // Header with Arc Reactor / Shield Icon
             Row(
@@ -239,15 +241,20 @@ fun PermissionRationaleSheet(
                             onDismiss()
                         }
                         PermissionKind.PER_SESSION -> {
-                            // If screen capture, opens screen capture flow
-                            PermissionOrchestrator.openPermissionSettings(context, spec)
+                            val handler = PermissionOrchestrator.sessionPermissionHandler
+                            if (handler != null) {
+                                handler.invoke(context, spec)
+                            } else {
+                                PermissionOrchestrator.openPermissionSettings(context, spec)
+                            }
                             onDismiss()
                         }
                     }
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp),
+                    .height(48.dp)
+                    .testTag("permission_rationale_grant_button"),
                 shape = RoundedCornerShape(12.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
                 contentPadding = PaddingValues(0.dp)
@@ -280,6 +287,35 @@ fun PermissionRationaleSheet(
                 }
             }
 
+            if (spec.kind == PermissionKind.RUNTIME) {
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedButton(
+                    onClick = {
+                        PermissionOrchestrator.openPermissionSettings(context, spec)
+                        onDismiss()
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 44.dp)
+                        .testTag("permission_rationale_open_settings_button"),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, BorderBlue)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = null,
+                        tint = CyanNeon,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "অ্যাপ সেটিংস খুলুন (ফিরে এলে কাজটি স্বয়ংক্রিয়ভাবে চালু হবে)",
+                        fontSize = 12.sp,
+                        color = CyanNeon
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(10.dp))
 
             Row(
@@ -290,7 +326,8 @@ fun PermissionRationaleSheet(
                     onClick = {
                         PermissionOrchestrator.markPostponed(spec.id)
                         onDismiss()
-                    }
+                    },
+                    modifier = Modifier.testTag("permission_rationale_postpone_button")
                 ) {
                     Text(
                         text = "পরে মনে করাবেন",
@@ -303,7 +340,8 @@ fun PermissionRationaleSheet(
                     onClick = {
                         PermissionOrchestrator.markPermanentlyDenied(spec.id)
                         onDismiss()
-                    }
+                    },
+                    modifier = Modifier.testTag("permission_rationale_deny_button")
                 ) {
                     Text(
                         text = "আর দেখাবেন না",

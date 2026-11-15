@@ -316,4 +316,24 @@ interface AssistantDao {
 
     @Query("DELETE FROM jarvis_task_history")
     suspend fun clearTaskHistory()
+
+    // Persistent Artifact Workspace
+    @Query("SELECT * FROM artifacts ORDER BY updatedAt DESC")
+    fun getAllArtifacts(): Flow<List<ArtifactEntity>>
+
+    @Query("SELECT * FROM artifacts ORDER BY updatedAt DESC")
+    suspend fun getAllArtifactsSync(): List<ArtifactEntity>
+
+    @Query("SELECT * FROM artifacts WHERE id = :id LIMIT 1")
+    suspend fun getArtifactByIdSync(id: Long): ArtifactEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertArtifact(artifact: ArtifactEntity): Long
+
+    @Update
+    suspend fun updateArtifact(artifact: ArtifactEntity)
+
+    @Query("DELETE FROM artifacts WHERE id = :id")
+    suspend fun deleteArtifact(id: Long)
 }
+

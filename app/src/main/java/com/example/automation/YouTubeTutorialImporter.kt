@@ -242,7 +242,16 @@ object YouTubeTutorialImporter {
         if (capResp.statusCode !in 200..299 || capResp.body.isBlank()) return null
 
         val textChunks = Regex("""<text[^>]*>([^<]+)</text>""").findAll(capResp.body)
-            .map { it.groupValues[1].replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", "\"").trim() }
+            .map {
+                it.groupValues[1]
+                    .replace("&amp;", "&")
+                    .replace("&#39;", "'")
+                    .replace("&quot;", "\"")
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&#10;", "\n")
+                    .trim()
+            }
             .filter { it.isNotBlank() }
             .toList()
         return if (textChunks.isNotEmpty()) textChunks.joinToString("\n") else null

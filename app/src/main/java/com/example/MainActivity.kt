@@ -43,7 +43,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        com.example.permissions.UniversalPermissionCoordinator.onResumeRecheck(this)
         com.example.permissions.JarvisPermissionManager.onResumeRecheckAndExecute(this)
     }
 

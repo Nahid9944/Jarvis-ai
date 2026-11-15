@@ -81,7 +81,7 @@ fun ControlCenterScreen(
                 title = {
                     Column {
                         Text(
-                            text = "মায়া (Maya) কন্ট্রোল সেন্টার",
+                            text = "NAHID AI • J.A.R.V.I.S. কন্ট্রোল সেন্টার",
                             fontSize = 17.sp,
                             fontWeight = FontWeight.Bold,
                             color = CcCyan

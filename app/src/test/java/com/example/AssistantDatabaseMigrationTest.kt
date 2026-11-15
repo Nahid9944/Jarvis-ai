@@ -186,4 +186,70 @@ class AssistantDatabaseMigrationTest {
         assertEquals("NAHID AI CORE", ownerUser!!.stationName)
         assertEquals("Masum Billah Nahid", ownerUser.profileName)
     }
+
+    @Test
+    fun migration19To20_preservesDataAndEnablesArtifactsCrud() = runBlocking {
+        // Build v19 database by migrating from v19-compatible SQLite file that lacks `artifacts` table
+        val dbFile = app.getDatabasePath(DatabaseMigrationHelper.NEW_DB_NAME)
+        dbFile.parentFile?.mkdirs()
+
+        // Capture current schema DDL and omit `artifacts` to simulate a real v19 install
+        val tempDb = Room.databaseBuilder(app, AssistantDatabase::class.java, "schema_seed_temp.db")
+            .allowMainThreadQueries()
+            .build()
+        val v19Ddl = mutableListOf<String>()
+        tempDb.openHelper.writableDatabase.query(
+            "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'room_%' AND name != 'android_metadata'"
+        ).use { c ->
+            while (c.moveToNext()) {
+                val tblName = c.getString(0)
+                val sql = c.getString(1)
+                if (tblName != "artifacts" && !sql.isNullOrBlank()) {
+                    v19Ddl.add(sql)
+                }
+            }
+        }
+        tempDb.close()
+        app.deleteDatabase("schema_seed_temp.db")
+
+        SQLiteDatabase.openOrCreateDatabase(dbFile, null).use { sqlite ->
+            v19Ddl.forEach { sql -> sqlite.execSQL(sql) }
+            sqlite.execSQL(
+                """
+                INSERT INTO ai_memories (key, content, category, importance, createdAt, updatedAt, source, isPinned, isActive)
+                VALUES ('v19_rule', 'Always reply accurately', 'SYSTEM_RULE', 2, 1000, 1000, 'USER', 1, 1)
+                """.trimIndent()
+            )
+            sqlite.version = 19
+        }
+
+        // Open v20 Room database (runs MIGRATION_19_20)
+        val upgradedDb = AssistantDatabase.getDatabase(app)
+        val dao = upgradedDb.assistantDao()
+
+        // Existing memory survived migration intact
+        val memories = dao.getAllActiveMemoriesSync()
+        assertEquals(1, memories.size)
+        assertEquals("v19_rule", memories.first().key)
+
+        // New artifacts table supports insert / read / update / delete
+        val newId = dao.insertArtifact(
+            com.example.data.local.ArtifactEntity(
+                title = "System Audit",
+                content = "# All gates green",
+                format = "MARKDOWN",
+                category = "DOCUMENT"
+            )
+        )
+        assertTrue(newId > 0L)
+        val loaded = dao.getArtifactByIdSync(newId)
+        assertNotNull(loaded)
+        assertEquals("System Audit", loaded!!.title)
+
+        dao.updateArtifact(loaded.copy(title = "System Audit v2"))
+        assertEquals("System Audit v2", dao.getArtifactByIdSync(newId)?.title)
+
+        dao.deleteArtifact(newId)
+        assertNull(dao.getArtifactByIdSync(newId))
+    }
 }

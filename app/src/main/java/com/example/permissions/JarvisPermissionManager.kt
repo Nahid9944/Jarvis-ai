@@ -6,9 +6,12 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.example.service.GeminiLiveAnnouncementAdapter
 import com.example.service.JarvisAccessibilityService
 import com.example.service.JarvisNotificationListenerService
+import com.example.service.QueuedAnnouncement
 import com.example.tools.ToolExecutionPipeline
+import org.json.JSONArray
 import com.example.tools.ToolRegistry
 import com.example.tools.ToolSpec
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +40,10 @@ import org.json.JSONObject
 object JarvisPermissionManager {
 
     private const val TAG = "JarvisPermissionMgr"
+    private const val PREFS_PENDING_OS = "jarvis_pending_os_action_prefs"
+    private const val KEY_PENDING_JSON = "pending_os_action_json"
+    private const val PENDING_TTL_MS = 5 * 60 * 1000L
+
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private val resumeMutex = Mutex()
 
@@ -56,6 +63,68 @@ object JarvisPermissionManager {
 
     @Volatile
     private var pendingExecutor: (suspend (String, JSONObject) -> JSONObject)? = null
+
+    private fun savePendingOsToPrefs(context: Context, pending: PendingOsPermissionAction?) {
+        try {
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_PENDING_OS, Context.MODE_PRIVATE)
+            if (pending == null) {
+                prefs.edit().remove(KEY_PENDING_JSON).apply()
+                return
+            }
+            val obj = JSONObject().apply {
+                put("pendingId", pending.pendingId)
+                put("executionId", pending.executionId)
+                put("toolName", pending.toolName)
+                put("descriptionBn", pending.descriptionBn)
+                put("argsJson", pending.argsJson)
+                put("caller", pending.caller)
+                put("requiredPermissionIds", JSONArray(pending.requiredPermissionIds))
+                put("missingPermissionIds", JSONArray(pending.missingPermissionIds))
+                put("approvedIdIfAny", pending.approvedIdIfAny ?: "")
+                put("createdAt", pending.createdAt)
+            }
+            prefs.edit().putString(KEY_PENDING_JSON, obj.toString()).apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    internal fun restorePendingOsFromPrefsIfNeeded(context: Context, now: Long = System.currentTimeMillis()): PendingOsPermissionAction? {
+        _pendingOsAction.value?.let { inMem ->
+            if (now - inMem.createdAt <= PENDING_TTL_MS) return inMem
+            _pendingOsAction.value = null
+            savePendingOsToPrefs(context, null)
+            return null
+        }
+        return try {
+            val prefs = context.applicationContext.getSharedPreferences(PREFS_PENDING_OS, Context.MODE_PRIVATE)
+            val raw = prefs.getString(KEY_PENDING_JSON, null) ?: return null
+            val obj = JSONObject(raw)
+            val createdAt = obj.optLong("createdAt", 0L)
+            if (createdAt <= 0L || (now - createdAt) > PENDING_TTL_MS) {
+                prefs.edit().remove(KEY_PENDING_JSON).apply()
+                return null
+            }
+            val reqArr = obj.optJSONArray("requiredPermissionIds") ?: JSONArray()
+            val missArr = obj.optJSONArray("missingPermissionIds") ?: JSONArray()
+            val restored = PendingOsPermissionAction(
+                pendingId = obj.optString("pendingId"),
+                executionId = obj.optString("executionId"),
+                toolName = obj.optString("toolName"),
+                descriptionBn = obj.optString("descriptionBn"),
+                argsJson = obj.optString("argsJson", "{}"),
+                caller = obj.optString("caller", "resume"),
+                requiredPermissionIds = List(reqArr.length()) { reqArr.optString(it) }.filter { it.isNotBlank() },
+                missingPermissionIds = List(missArr.length()) { missArr.optString(it) }.filter { it.isNotBlank() },
+                approvedIdIfAny = obj.optString("approvedIdIfAny").ifBlank { null },
+                state = JarvisActionState.WAITING_FOR_OS_PERMISSION,
+                createdAt = createdAt
+            )
+            _pendingOsAction.value = restored
+            restored
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     // =========================================================================
     // 1. UNIFIED ANDROID SYSTEM PERMISSION CHECKS (SINGLE SOURCE OF TRUTH)
@@ -307,6 +376,7 @@ object JarvisPermissionManager {
         )
         pendingExecutor = executor
         _pendingOsAction.value = pending
+        savePendingOsToPrefs(context, pending)
         ActionApprovalRegistry.updateActionState(JarvisActionState.WAITING_FOR_OS_PERMISSION)
 
         val firstMissing = missingSpecs.first()
@@ -338,8 +408,9 @@ object JarvisPermissionManager {
         scope.launch {
             refreshSnapshotAndDetectRevocations(context)
 
+            val nextMissingHolder = arrayOfNulls<PermissionSpec>(1)
             val toRun: Pair<PendingOsPermissionAction, (suspend (String, JSONObject) -> JSONObject)>? = resumeMutex.withLock {
-                val pending = _pendingOsAction.value ?: return@withLock null
+                val pending = restorePendingOsFromPrefsIfNeeded(context) ?: return@withLock null
                 val stillMissing = pending.requiredPermissionIds.mapNotNull { PermissionRegistry.get(it) }
                     .filter { spec ->
                         try {
@@ -351,19 +422,42 @@ object JarvisPermissionManager {
 
                 if (stillMissing.isEmpty()) {
                     _pendingOsAction.value = null
-                    val exec = pendingExecutor ?: fallbackExecutor
+                    savePendingOsToPrefs(context, null)
+                    val exec = pendingExecutor ?: fallbackExecutor ?: { tool, argsObj ->
+                        val dao = com.example.data.local.AssistantDatabase.getDatabase(context).assistantDao()
+                        com.example.ai.AssistantToolExecutor(
+                            dao = dao,
+                            onNavigate = {},
+                            context = context
+                        ).executeToolWithCaller(
+                            name = tool,
+                            args = argsObj,
+                            caller = pending.caller
+                        )
+                    }
                     pendingExecutor = null
-                    if (exec != null) {
-                        ActionApprovalRegistry.updateActionState(JarvisActionState.OS_PERMISSION_GRANTED)
-                        Pair(pending, exec)
-                    } else null
+                    ActionApprovalRegistry.updateActionState(JarvisActionState.OS_PERMISSION_GRANTED)
+                    Pair(pending, exec)
                 } else {
-                    _pendingOsAction.value = pending.copy(missingPermissionIds = stillMissing.map { it.id })
+                    val updated = pending.copy(missingPermissionIds = stillMissing.map { it.id })
+                    _pendingOsAction.value = updated
+                    savePendingOsToPrefs(context, updated)
+                    nextMissingHolder[0] = stillMissing.first()
                     null
                 }
             }
 
-            if (toRun != null) {
+            if (toRun == null) {
+                val nextSpec = nextMissingHolder[0]
+                if (nextSpec != null && PermissionOrchestrator.currentRequest.value == null) {
+                    val desc = _pendingOsAction.value?.descriptionBn ?: nextSpec.titleBn
+                    PermissionOrchestrator.clearPostponed(nextSpec.id)
+                    PermissionOrchestrator.request(
+                        spec = nextSpec,
+                        reason = "'$desc' সম্পন্ন করতে '${nextSpec.titleBn}' অনুমতি প্রয়োজন।"
+                    )
+                }
+            } else {
                 val (pending, exec) = toRun
                 val args = try {
                     JSONObject(pending.argsJson)
@@ -386,14 +480,21 @@ object JarvisPermissionManager {
                 val ok = res.optBoolean("success", false)
                 val msg = res.optString("summaryBengali", res.optString("message", "পেন্ডিং কাজ সম্পন্ন হয়েছে।"))
                 _lastAutoResumeResult.value = Pair(pending.toolName, msg)
+                GeminiLiveAnnouncementAdapter.enqueueOrDispatch(
+                    eventKey = "auto_resume_${pending.executionId}",
+                    rawText = msg,
+                    category = QueuedAnnouncement.CATEGORY_SYSTEM_ALERT,
+                    priority = QueuedAnnouncement.PRIORITY_NORMAL
+                )
                 onResult?.invoke(ok, msg)
             }
         }
     }
 
-    fun cancelPendingOsAction() {
+    fun cancelPendingOsAction(context: Context? = null) {
         _pendingOsAction.value = null
         pendingExecutor = null
+        if (context != null) savePendingOsToPrefs(context, null)
     }
 
     fun clearRevokedNotices() {

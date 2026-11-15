@@ -250,6 +250,42 @@ object VoiceCommandUnderstandingEngine {
             )
         }
 
+        // Step 2.5: Active Learned Skills matching from local library
+        try {
+            val skillRepo = com.example.data.repository.JarvisSkillRepository(
+                com.example.data.local.AssistantDatabase.getDatabase(context).jarvisSkillDao()
+            )
+            val matchedSkill = skillRepo.findMatchingSkill(clean)
+            if (matchedSkill != null && matchedSkill.status.equals("ACTIVE", ignoreCase = true) && matchedSkill.stepCount > 0) {
+                val skillArgs = JSONObject().apply {
+                    put("skillNameOrTrigger", clean)
+                }
+                val trackedTask = ActiveTaskInterruptionManager.registerNewTask(
+                    goalBn = clean,
+                    toolName = "executeLearnedSkill",
+                    steps = listOf("শেখা স্কিল ম্যাচিং", "ধাপসমূহ চালনা", "যাচাইকরণ")
+                )
+                val execResult = executor.executeToolWithCaller("executeLearnedSkill", skillArgs, caller)
+                val isSuccess = execResult.optBoolean("success", false)
+                val feedback = execResult.optString(
+                    "summaryBengali",
+                    execResult.optString("message", "স্কিল এক্সিকিউশন সম্পন্ন হয়েছে।")
+                )
+                ActiveTaskInterruptionManager.completeTask(trackedTask.taskId, isSuccess, feedback)
+                val needsA11y = execResult.optString("permissionRequired") == "accessibility"
+                if (needsA11y) onPromptAccessibility?.invoke()
+                return@withContext VoiceExecutionOutcome(
+                    handled = true,
+                    success = isSuccess,
+                    feedbackMessage = feedback,
+                    toolName = "executeLearnedSkill",
+                    needsAccessibility = needsA11y,
+                    rawResult = execResult
+                )
+            }
+        } catch (_: Exception) {
+        }
+
         // Step 3: Not an OS automation command — route to Gemini Live Conversational Core
         VoiceExecutionOutcome(
             handled = false,
@@ -412,10 +448,31 @@ object VoiceCommandUnderstandingEngine {
 
             // News (Canonical name: getLiveNews)
             lower.contains("খবর") || lower.contains("সংবাদ") || lower.contains("news") || lower.contains("আজকের তাজা খবর") -> {
+                if (lower.contains("ai") || lower.contains("tech") || lower.contains("প্রযুক্তি") || lower.contains("এআই")) {
+                    args.put("category", "প্রযুক্তি ও এআই")
+                } else {
+                    args.put("category", "সব")
+                }
                 Pair("getLiveNews", args)
             }
 
-            // Notifications
+            // Daily / Evening Briefing (Canonical name: generateDailyBriefing)
+            lower.contains("briefing") || lower.contains("ব্রিফিং") -> {
+                val slot = when {
+                    lower.contains("evening") || lower.contains("সন্ধ্যা") -> "Evening"
+                    lower.contains("night") || lower.contains("রাত") -> "Night"
+                    lower.contains("morning") || lower.contains("সকাল") -> "Morning"
+                    else -> ""
+                }
+                if (slot.isNotBlank()) args.put("timeOfDay", slot)
+                Pair("generateDailyBriefing", args)
+            }
+
+            // Notifications (list vs read aloud)
+            lower.contains("কোনো notification") || lower.contains("নোটিফিকেশন আছে") || lower.contains("check notification") || lower.contains("notifications") -> {
+                args.put("limit", 10)
+                Pair("getRecentNotifications", args)
+            }
             lower.contains("নোটিফিকেশন পড়ো") || lower.contains("নোটিফিকেশন শোনাও") || lower.contains("read notification") || lower.contains("latest notification") -> {
                 args.put("limit", 1)
                 Pair("readNotificationAloud", args)
@@ -426,8 +483,14 @@ object VoiceCommandUnderstandingEngine {
                 Pair("emergencyStopAllWork", args)
             }
 
-            // Camera
-            lower.contains("ক্যামেরা খোলো") || lower.contains("ক্যামেরা অন") || lower.contains("open camera") -> {
+            // Camera (start, stop, switch)
+            lower.contains("ক্যামেরা বন্ধ") || lower.contains("stop camera") || lower.contains("close camera") -> {
+                Pair("stopCameraVision", args)
+            }
+            lower.contains("front camera") || lower.contains("সামনের ক্যামেরা") || lower.contains("ক্যামেরা ঘোরাও") || lower.contains("switch camera") -> {
+                Pair("switchCameraLens", args)
+            }
+            lower.contains("ক্যামেরা খোলো") || lower.contains("ক্যামেরা অন") || lower.contains("ক্যামেরা চালু") || lower.contains("open camera") || lower.contains("live camera") -> {
                 Pair("startCameraVision", args)
             }
 

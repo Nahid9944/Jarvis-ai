@@ -9,6 +9,7 @@ import com.example.service.JarvisAccessibilityService
 import com.example.util.JarvisDeviceAutomationHelper
 import com.example.util.JarvisEmergencyStopCoordinator
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -33,6 +34,8 @@ data class AutonomousLoopExecution(
 
 object JarvisAutonomousLoopOrchestrator {
 
+    private const val MAX_PLAN_STEPS = 12
+    private const val EXECUTION_TIMEOUT_MS = 45_000L
     private val isCancelled = java.util.concurrent.atomic.AtomicBoolean(false)
 
     fun cancelAllTasks() {
@@ -143,9 +146,11 @@ object JarvisAutonomousLoopOrchestrator {
             )
         )
 
+        val timedOutResult = withTimeoutOrNull(EXECUTION_TIMEOUT_MS) {
         var allSuccess = true
         if (planSteps != null && planSteps.length() > 0) {
-            for (i in 0 until planSteps.length()) {
+            val cappedCount = planSteps.length().coerceAtMost(MAX_PLAN_STEPS)
+            for (i in 0 until cappedCount) {
                 val stepObj = planSteps.optJSONObject(i) ?: continue
                 val actionType = stepObj.optString("action", "click")
                 val target = stepObj.optString("target", "")
@@ -163,7 +168,7 @@ object JarvisAutonomousLoopOrchestrator {
                         )
                     )
                     ActiveTaskInterruptionManager.completeTask(trackedTask.taskId, false, "অ্যাকশন বাতিল হয়েছে")
-                    return AutonomousLoopExecution(
+                    return@withTimeoutOrNull AutonomousLoopExecution(
                         success = false,
                         goal = goal,
                         stepsTaken = steps,
@@ -316,7 +321,7 @@ object JarvisAutonomousLoopOrchestrator {
         } else {
             if (!waitIfPaused(trackedTask.taskId) || shouldAbort(trackedTask.taskId)) {
                 ActiveTaskInterruptionManager.completeTask(trackedTask.taskId, false, "অ্যাকশন বাতিল হয়েছে")
-                return AutonomousLoopExecution(
+                return@withTimeoutOrNull AutonomousLoopExecution(
                     success = false,
                     goal = goal,
                     stepsTaken = steps,
@@ -332,7 +337,7 @@ object JarvisAutonomousLoopOrchestrator {
             ExecutionCommitController.registerAction(singleActionId, "single_goal")
             if (!ExecutionCommitController.canDispatchAction(singleActionId)) {
                 ActiveTaskInterruptionManager.completeTask(trackedTask.taskId, false, "ডিসপ্যাচের আগে বাতিল")
-                return AutonomousLoopExecution(
+                return@withTimeoutOrNull AutonomousLoopExecution(
                     success = false,
                     goal = goal,
                     stepsTaken = steps,
@@ -403,13 +408,25 @@ object JarvisAutonomousLoopOrchestrator {
 
         ActiveTaskInterruptionManager.completeTask(trackedTask.taskId, verified, summary)
 
-        return AutonomousLoopExecution(
+        AutonomousLoopExecution(
             success = verified,
             goal = goal,
             stepsTaken = steps,
             verified = verified,
             summaryBengali = summary,
             finalState = if (verified) "SUCCEEDED" else if (hasExecutionEvidence) "PARTIALLY_COMPLETED" else "FAILED"
+        )
+        }
+        if (timedOutResult != null) return timedOutResult
+
+        ActiveTaskInterruptionManager.completeTask(trackedTask.taskId, false, "অ্যাকশন টাইমআউট হয়েছে")
+        return AutonomousLoopExecution(
+            success = false,
+            goal = goal,
+            stepsTaken = steps,
+            verified = false,
+            summaryBengali = "নির্ধারিত ৪৫ সেকেন্ডের মধ্যে অটোমেশন কাজটি সম্পন্ন হয়নি (TIMED_OUT)।",
+            finalState = "TIMED_OUT"
         )
     }
 

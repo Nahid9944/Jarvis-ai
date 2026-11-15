@@ -903,18 +903,26 @@ class AssistantToolExecutor(
 
                 "getLiveNews" -> {
                     val category = args.optString("category", "সব").trim()
-                    val newsList = NewsAndRegulatoryService.getRecentNews(category)
+                    val newsList = NewsAndRegulatoryService.getLiveNews(category)
                     val arr = JSONArray()
                     newsList.forEach { n ->
                         val obj = JSONObject()
                         obj.put("title", n.title)
                         obj.put("summary", n.summary)
+                        obj.put("source", n.source)
+                        obj.put("date", n.date)
+                        obj.put("url", n.url)
                         arr.put(obj)
                     }
                     result.put("success", newsList.isNotEmpty())
+                    if (newsList.isNotEmpty()) {
+                        JarvisHudEventBus.emitOpenHeadlines(newsList)
+                    } else {
+                        result.put("status", "OFFLINE_LIMITED")
+                    }
                     result.put("count", newsList.size)
                     result.put("news", arr)
-                    result.put("summaryBengali", if (newsList.isNotEmpty()) "তাজা খবর:\n" + newsList.take(3).joinToString("\n• ") { it.title } else "এই মুহূর্তে কোনো তাজা সংবাদ সংগ্রহ করা যায়নি।")
+                    result.put("summaryBengali", if (newsList.isNotEmpty()) "ইনফরমেশন প্যানেলে সর্বশেষ ${newsList.size}টি সংবাদ দেখানো হচ্ছে:\n" + newsList.take(3).joinToString("\n• ") { "${it.title} (${it.source})" } else "ইন্টারনেট বা নিউজ ফিড সংযোগ না থাকায় এই মুহূর্তে তাজা সংবাদ আনা যায়নি।")
                 }
 
                 "searchExternalKnowledge" -> {
@@ -1189,15 +1197,16 @@ class AssistantToolExecutor(
                 // 12. CAMERA VISION & MULTIMODAL INTELLIGENCE
                 // -------------------------------------------------------------
                 "startCameraVision" -> {
-                    onNavigate("camera")
+                    JarvisHudEventBus.emitToggleInlineCamera(true)
                     result.put("success", true)
-                    result.put("summaryBengali", "ক্যামেরা ভিশন স্ক্রিন চালু করা হয়েছে, স্যার।")
+                    result.put("summaryBengali", "লাইভ ক্যামেরা ভিশন সক্রিয় করা হয়েছে, স্যার।")
                 }
 
                 "stopCameraVision" -> {
+                    JarvisHudEventBus.emitToggleInlineCamera(false)
                     onNavigate("hud")
                     result.put("success", true)
-                    result.put("summaryBengali", "ক্যামেরা ভিশন বন্ধ করে হোম HUD-এ ফেরা হয়েছে।")
+                    result.put("summaryBengali", "ক্যামেরা ভিশন বন্ধ করা হয়েছে।")
                 }
 
                 "captureCameraFrame" -> {
@@ -1255,6 +1264,9 @@ class AssistantToolExecutor(
 
                 "switchCameraLens" -> {
                     val (ok, msg) = com.example.util.JarvisCameraManager.switchLens()
+                    if (ok) {
+                        JarvisHudEventBus.emitCameraLensChanged(com.example.util.JarvisCameraManager.activeLensFacing)
+                    }
                     result.put("success", ok)
                     result.put("summaryBengali", msg)
                 }
@@ -1552,8 +1564,9 @@ class AssistantToolExecutor(
                 }
 
                 "generateDailyBriefing" -> {
+                    val slot = args.optString("timeOfDay", "").trim()
                     val rEngine = if (context != null) com.example.automation.JarvisRoutineEngine(context, dao) else null
-                    val rResult = rEngine?.executeRoutine("Morning")
+                    val rResult = rEngine?.generateDailyBriefing(slot)
                     val ok = rResult?.success == true
                     result.put("success", ok)
                     result.put("summaryBengali", rResult?.summaryBengali ?: "দৈনিক ব্রিফিং প্রস্তুত করা যায়নি।")
@@ -1618,9 +1631,13 @@ class AssistantToolExecutor(
                 if (context != null) {
                     val (ok, msg) = JarvisDeviceAutomationHelper.openAndControlWhatsApp(context, contact, msgText)
                     result.put("success", ok)
+                    result.put("verified", false)
+                    result.put("actionStatus", if (ok) "COMPOSER_OPENED_READY_TO_SEND" else "FAILED")
                     result.put("summaryBengali", msg)
                 } else {
                     result.put("success", false)
+                    result.put("verified", false)
+                    result.put("actionStatus", "FAILED")
                     result.put("summaryBengali", "হোয়াটসঅ্যাপ খোলার ব্যবস্থা করা যায়নি।")
                 }
             }

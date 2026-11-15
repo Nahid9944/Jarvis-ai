@@ -194,3 +194,18 @@ data class JarvisConversationSnippetEntity(
     val importanceScore: Int = 1, // 1 normal, 2 medium, 3 high / pinned
     val timestamp: Long = System.currentTimeMillis()
 )
+
+@Entity(tableName = "artifacts")
+@JsonClass(generateAdapter = true)
+data class ArtifactEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+    val title: String,
+    val content: String,
+    val format: String = "MARKDOWN", // MARKDOWN, TEXT, CODE, JSON
+    val category: String = "DOCUMENT", // DOCUMENT, RESEARCH, CODE, SCRIPT
+    val filePath: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+

@@ -220,7 +220,7 @@ fun ProfileManagementComponent(
                     Column {
                         Text("প্রধান ভয়েস ও ভাষা", fontSize = 11.5.sp, color = ProfileTextDim)
                         Text(
-                            text = "মায়া (Maya) • $assistantVoice (বাংলা / Banglish / EN)",
+                            text = "NAHID AI (J.A.R.V.I.S.) • $assistantVoice (বাংলা / Banglish / EN)",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
                             color = ProfileTextWhite

@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 data class PlannedSubTask(
     val stepIndex: Int,
@@ -17,8 +18,18 @@ data class PlannedSubTask(
     val toolName: String?,
     val args: JSONObject = JSONObject(),
     val assignedAgent: AiAgent,
-    val status: String = "PENDING", // PENDING, SUCCEEDED, FAILED, SKIPPED, CANCELLED
-    val summaryBengali: String = ""
+    val status: String = "PENDING", // PENDING, SUCCEEDED, FAILED, SKIPPED, CANCELLED, PERMISSION_REQUIRED, CONFIRMATION_REQUIRED
+    val summaryBengali: String = "",
+    val permissionRequired: String = ""
+)
+
+data class PendingSlotRequest(
+    val intentType: String, // CALL, WHATSAPP, SMS
+    val partialTool: String,
+    val partialArgs: JSONObject,
+    val missingSlot: String,
+    val promptBn: String,
+    val createdAt: Long = System.currentTimeMillis()
 )
 
 data class MasterExecutionPlan(
@@ -34,7 +45,7 @@ data class MasterExecutionPlan(
 
 data class MasterOrchestrationResult(
     val success: Boolean,
-    val finalState: String, // SUCCEEDED, PARTIALLY_COMPLETED, FAILED, CANCELLED, PAUSED, INTERRUPTED, PERSONALITY_SWITCHED, CONVERSATIONAL
+    val finalState: String, // SUCCEEDED, PARTIALLY_COMPLETED, FAILED, CANCELLED, PAUSED, INTERRUPTED, PERSONALITY_SWITCHED, CONVERSATIONAL, WAITING_FOR_USER, REQUIRES_PERMISSION, REQUIRES_CONFIRMATION
     val plan: MasterExecutionPlan,
     val executedSteps: List<PlannedSubTask>,
     val summaryBengali: String,
@@ -51,6 +62,11 @@ data class MasterOrchestrationResult(
 object JarvisMasterOrchestrator {
 
     private const val MAX_SUBTASKS = 6
+    private const val COMMAND_DEDUP_WINDOW_MS = 1800L
+    private const val TOGGLE_DEDUP_WINDOW_MS = 500L
+
+    private val inFlightKeys = ConcurrentHashMap<String, Boolean>()
+    private val recentExecutionTimestamps = ConcurrentHashMap<String, Long>()
 
     private val _activePlan = MutableStateFlow<MasterExecutionPlan?>(null)
     val activePlan: StateFlow<MasterExecutionPlan?> = _activePlan.asStateFlow()
@@ -60,6 +76,54 @@ object JarvisMasterOrchestrator {
 
     private val _lastOrchestrationResult = MutableStateFlow<MasterOrchestrationResult?>(null)
     val lastOrchestrationResult: StateFlow<MasterOrchestrationResult?> = _lastOrchestrationResult.asStateFlow()
+
+    private val _pendingSlotRequest = MutableStateFlow<PendingSlotRequest?>(null)
+    val pendingSlotRequest: StateFlow<PendingSlotRequest?> = _pendingSlotRequest.asStateFlow()
+
+    private val _preferredUserAgent = MutableStateFlow<AiAgent?>(null)
+
+    fun setUserSelectedAgent(agent: AiAgent) {
+        _preferredUserAgent.value = agent
+        _selectedSpecialist.value = agent
+    }
+
+    fun clearPendingSlotRequest() {
+        _pendingSlotRequest.value = null
+    }
+
+    fun resetForTest() {
+        _activePlan.value = null
+        _lastOrchestrationResult.value = null
+        _pendingSlotRequest.value = null
+        _preferredUserAgent.value = null
+        _selectedSpecialist.value = AiAgentRegistry.JARVIS_MASTER
+        inFlightKeys.clear()
+        recentExecutionTimestamps.clear()
+    }
+
+    private fun acquireCommandSlot(dedupKey: String, cooldownMs: Long, bypass: Boolean): String? {
+        if (bypass) return null
+        if (inFlightKeys.putIfAbsent(dedupKey, true) != null) {
+            return "IN_FLIGHT"
+        }
+        val now = System.currentTimeMillis()
+        val prev = recentExecutionTimestamps[dedupKey]
+        if (prev != null && (now - prev) < cooldownMs) {
+            inFlightKeys.remove(dedupKey)
+            return "COOLDOWN"
+        }
+        recentExecutionTimestamps[dedupKey] = now
+        return null
+    }
+
+    private fun releaseCommandSlot(dedupKey: String, bypass: Boolean, clearCooldown: Boolean = false) {
+        if (!bypass) {
+            inFlightKeys.remove(dedupKey)
+            if (clearCooldown) {
+                recentExecutionTimestamps.remove(dedupKey)
+            }
+        }
+    }
 
     /**
      * Selects the appropriate domain specialist agent based on user utterance or tool name.
@@ -196,9 +260,122 @@ object JarvisMasterOrchestrator {
     }
 
     /**
+     * Centralized structured tool execution entry point used by Gemini Live voice tool calls,
+     * Archer HUD quick shortcuts (LIVE CAMERA, FRONT/BACK, SHARE SCREEN), and automated triggers.
+     * Integrates agent selection, MasterExecutionPlan tracking, redundant execution prevention,
+     * and ToolExecutionPipeline / JarvisPermissionManager enforcement.
+     */
+    suspend fun orchestrateToolCall(
+        context: Context?,
+        toolName: String,
+        args: JSONObject = JSONObject(),
+        caller: String = "gemini_live_voice",
+        toolExecutor: AssistantToolExecutor?
+    ): JSONObject {
+        val cleanTool = toolName.trim()
+        if (toolExecutor == null) {
+            return JSONObject().apply {
+                put("success", false)
+                put("status", "FAILED")
+                put("summaryBengali", "টুল এক্সিকিউটর অনুপলব্ধ থাকায় '$cleanTool' চালানো যায়নি।")
+            }
+        }
+
+        val canonicalArgs = JSONObject(args.toString()).apply {
+            remove("_approvalId")
+            remove("_executionId")
+            remove("_confirmationToken")
+        }
+        val dedupKey = "tool:$cleanTool:${canonicalArgs.toString().lowercase(Locale.ROOT)}"
+        val isToggleOrCamera = cleanTool in setOf(
+            "switchCameraLens", "startCameraVision", "stopCameraVision",
+            "startScreenSharing", "stopScreenSharing"
+        )
+        val cooldown = if (isToggleOrCamera) TOGGLE_DEDUP_WINDOW_MS else COMMAND_DEDUP_WINDOW_MS
+        val bypassDedup = cleanTool == "emergencyStopAllWork" ||
+            caller == "auto_resume" ||
+            args.has("_approvalId") ||
+            args.has("_confirmationToken")
+
+        val blockedReason = acquireCommandSlot(dedupKey, cooldown, bypassDedup)
+        if (blockedReason != null) {
+            return JSONObject().apply {
+                put("success", false)
+                put("status", "DUPLICATE_IGNORED")
+                put("reason", blockedReason)
+                put("toolName", cleanTool)
+                put("summaryBengali", "'$cleanTool' কমান্ডটি ইতিমধ্যে প্রক্রিয়াকরণ করা হচ্ছে।")
+            }
+        }
+
+        try {
+            val plan = buildPlan(
+                utterance = cleanTool,
+                toolNameOverride = cleanTool,
+                toolArgsOverride = args
+            )
+            val specialist = plan.primaryAgent
+            _selectedSpecialist.value = specialist
+
+            val activeTask = if (cleanTool != "emergencyStopAllWork") {
+                ActiveTaskInterruptionManager.registerNewTask(
+                    goalBn = cleanTool,
+                    toolName = cleanTool,
+                    steps = listOf(specialist.titleBengali, cleanTool)
+                )
+            } else null
+
+            val jsonRes = toolExecutor.executeToolWithCaller(cleanTool, args, caller)
+            val statusStr = jsonRes.optString("status", "")
+            val ok = jsonRes.optBoolean("success", false)
+            val summary = jsonRes.optString("summaryBengali", if (ok) "সম্পন্ন" else "ব্যর্থ")
+            val permReq = jsonRes.optString("permissionRequired", "")
+
+            if (activeTask != null) {
+                ActiveTaskInterruptionManager.completeTask(activeTask.taskId, ok, summary)
+            }
+
+            val stepStatus = when {
+                statusStr == "PERMISSION_REQUIRED" -> "PERMISSION_REQUIRED"
+                statusStr == "CONFIRMATION_REQUIRED" -> "CONFIRMATION_REQUIRED"
+                statusStr == "CANCELLED_BEFORE_DISPATCH" || statusStr == "CANCELLED" -> "CANCELLED"
+                ok -> "SUCCEEDED"
+                else -> "FAILED"
+            }
+            val updatedStep = plan.subTasks.first().copy(
+                status = stepStatus,
+                summaryBengali = summary,
+                permissionRequired = permReq
+            )
+            val finalState = when {
+                statusStr == "PERMISSION_REQUIRED" -> "REQUIRES_PERMISSION"
+                statusStr == "CONFIRMATION_REQUIRED" -> "REQUIRES_CONFIRMATION"
+                statusStr == "CANCELLED_BEFORE_DISPATCH" || statusStr == "CANCELLED" -> "CANCELLED"
+                ok -> "SUCCEEDED"
+                else -> "FAILED"
+            }
+            _lastOrchestrationResult.value = MasterOrchestrationResult(
+                success = ok,
+                finalState = finalState,
+                plan = plan.copy(subTasks = listOf(updatedStep)),
+                executedSteps = listOf(updatedStep),
+                summaryBengali = summary,
+                needsConfirmation = statusStr == "CONFIRMATION_REQUIRED",
+                needsPermission = statusStr == "PERMISSION_REQUIRED"
+            )
+            if (finalState in setOf("REQUIRES_PERMISSION", "REQUIRES_CONFIRMATION", "CANCELLED")) {
+                recentExecutionTimestamps.remove(dedupKey)
+            }
+            return jsonRes
+        } finally {
+            releaseCommandSlot(dedupKey, bypassDedup)
+        }
+    }
+
+    /**
      * Orchestrates complete execution of a natural-language user goal or explicit tool call:
-     * emotion sensing -> personality switching -> interruption handling -> planning ->
-     * specialist tool execution -> partial-failure & verification aggregation.
+     * deduplication -> emotion sensing -> personality switching -> interruption handling ->
+     * planning -> specialist tool execution -> partial-failure & verification aggregation.
      */
     suspend fun orchestrate(
         context: Context?,
@@ -209,6 +386,28 @@ object JarvisMasterOrchestrator {
     ): MasterOrchestrationResult {
         val cleanInput = utterance.trim()
         val plan = buildPlan(cleanInput)
+
+        val hasPendingGate = com.example.permissions.JarvisPermissionManager.pendingUserApproval.value != null ||
+            _pendingSlotRequest.value != null
+        val isStopCommand = ActiveTaskInterruptionManager.classifyInterruptionIntent(cleanInput) == InterruptionIntent.EMERGENCY_STOP
+        val bypassDedup = cleanInput.isBlank() ||
+            hasPendingGate ||
+            isStopCommand ||
+            toolExecutor == null ||
+            !confirmationToken.isNullOrBlank()
+        val utteranceKey = "utterance:${cleanInput.lowercase(Locale.ROOT)}"
+        val blockedReason = acquireCommandSlot(utteranceKey, COMMAND_DEDUP_WINDOW_MS, bypassDedup)
+        if (blockedReason != null) {
+            return MasterOrchestrationResult(
+                success = false,
+                finalState = "DUPLICATE_IGNORED",
+                plan = plan,
+                executedSteps = emptyList(),
+                summaryBengali = "কমান্ডটি ইতিমধ্যে প্রক্রিয়াকরণ করা হচ্ছে।"
+            )
+        }
+
+        try {
 
         // 0. Pending One-Time Confirmation Intercept ("হ্যাঁ", "হ্যাঁ করো", "অনুমতি দিলাম", "না", etc.)
         val pendingApproval = com.example.permissions.JarvisPermissionManager.pendingUserApproval.value
@@ -230,6 +429,7 @@ object JarvisMasterOrchestrator {
                         val jsonRes = toolExecutor.executeToolWithCaller(approved.toolName, approvedArgs, caller)
                         val statusStr = jsonRes.optString("status", "")
                         val ok = jsonRes.optBoolean("success", false)
+                        val permReq = jsonRes.optString("permissionRequired", "")
                         val summary = jsonRes.optString("summaryBengali", if (ok) "অনুমোদিত কাজ সফলভাবে সম্পন্ন হয়েছে।" else "কাজটি সম্পন্ন করা যায়নি।")
                         val step = PlannedSubTask(
                             stepIndex = 1,
@@ -237,11 +437,18 @@ object JarvisMasterOrchestrator {
                             toolName = approved.toolName,
                             args = approvedArgs,
                             assignedAgent = selectSpecialistAgent(cleanInput, approved.toolName),
-                            status = if (ok) "SUCCEEDED" else "FAILED",
-                            summaryBengali = summary
+                            status = when {
+                                statusStr == "PERMISSION_REQUIRED" -> "PERMISSION_REQUIRED"
+                                statusStr == "CONFIRMATION_REQUIRED" -> "CONFIRMATION_REQUIRED"
+                                ok -> "SUCCEEDED"
+                                else -> "FAILED"
+                            },
+                            summaryBengali = summary,
+                            permissionRequired = permReq
                         )
                         val finalState = when {
                             statusStr == "PERMISSION_REQUIRED" -> "REQUIRES_PERMISSION"
+                            statusStr == "CONFIRMATION_REQUIRED" -> "REQUIRES_CONFIRMATION"
                             ok -> "SUCCEEDED"
                             else -> "FAILED"
                         }
@@ -251,6 +458,7 @@ object JarvisMasterOrchestrator {
                             plan = plan.copy(subTasks = listOf(step)),
                             executedSteps = listOf(step),
                             summaryBengali = summary,
+                            needsConfirmation = statusStr == "CONFIRMATION_REQUIRED",
                             needsPermission = statusStr == "PERMISSION_REQUIRED"
                         )
                         _lastOrchestrationResult.value = res
@@ -355,12 +563,116 @@ object JarvisMasterOrchestrator {
             return res
         }
 
+        // 2.5 Multi-Turn Slot-Filling Continuation (e.g., user answers "আব্বু" or "আব্বুকে বলো আমি আসছি")
+        var workingPlan = plan
+        val activeSlot = _pendingSlotRequest.value
+        val slotExpired = activeSlot != null && (System.currentTimeMillis() - activeSlot.createdAt) > 180_000L
+        if (slotExpired) _pendingSlotRequest.value = null
+        if (activeSlot != null && !slotExpired && workingPlan.subTasks.none { it.toolName != null }) {
+            val lowerReply = cleanInput.lowercase(Locale.ROOT)
+            if (lowerReply in listOf("বাতিল", "বাদ দাও", "cancel", "না", "no")) {
+                _pendingSlotRequest.value = null
+                val res = MasterOrchestrationResult(
+                    success = true,
+                    finalState = "CANCELLED",
+                    plan = workingPlan,
+                    executedSteps = emptyList(),
+                    summaryBengali = "অসম্পূর্ণ নির্দেশটি বাতিল করা হয়েছে।"
+                )
+                _lastOrchestrationResult.value = res
+                return res
+            }
+            val mergedArgs = JSONObject(activeSlot.partialArgs.toString())
+            when (activeSlot.intentType) {
+                "CALL" -> {
+                    mergedArgs.put("contactName", cleanInput)
+                    mergedArgs.put("phoneNumber", cleanInput)
+                }
+                "WHATSAPP", "SMS" -> {
+                    val splitParts = cleanInput.split(Regex("""\s+(?:কে|বলো|লিখে দাও|লিখো|to|:|-)\s+""", RegexOption.IGNORE_CASE), limit = 2)
+                    if (splitParts.size == 2 && splitParts[0].isNotBlank() && splitParts[1].isNotBlank()) {
+                        if (activeSlot.intentType == "SMS") {
+                            mergedArgs.put("phoneNumber", splitParts[0].trim())
+                            mergedArgs.put("contactName", splitParts[0].trim())
+                        } else {
+                            mergedArgs.put("contact", splitParts[0].trim())
+                        }
+                        mergedArgs.put("message", splitParts[1].trim())
+                    } else if (!mergedArgs.has("contact") && !mergedArgs.has("phoneNumber")) {
+                        if (activeSlot.intentType == "SMS") {
+                            mergedArgs.put("phoneNumber", cleanInput)
+                            mergedArgs.put("contactName", cleanInput)
+                        } else {
+                            mergedArgs.put("contact", cleanInput)
+                        }
+                        mergedArgs.put("message", "")
+                    } else {
+                        mergedArgs.put("message", cleanInput)
+                    }
+                }
+            }
+            _pendingSlotRequest.value = null
+            val resolvedStep = PlannedSubTask(
+                stepIndex = 1,
+                rawCommand = cleanInput,
+                toolName = activeSlot.partialTool,
+                args = mergedArgs,
+                assignedAgent = selectSpecialistAgent(cleanInput, activeSlot.partialTool)
+            )
+            workingPlan = workingPlan.copy(
+                primaryAgent = resolvedStep.assignedAgent,
+                subTasks = listOf(resolvedStep)
+            )
+        }
+
+        // 2.75 Learned Skill Check & Incomplete Communication Slot Detection
+        if (workingPlan.subTasks.none { it.toolName != null }) {
+            if (context != null) {
+                val matchedSkill = try {
+                    com.example.data.repository.JarvisSkillRepository(
+                        com.example.data.local.AssistantDatabase.getDatabase(context).jarvisSkillDao()
+                    ).findMatchingSkill(cleanInput)
+                } catch (_: Exception) {
+                    null
+                }
+                if (matchedSkill != null && matchedSkill.status.equals("ACTIVE", ignoreCase = true) && matchedSkill.stepCount > 0) {
+                    val skillStep = PlannedSubTask(
+                        stepIndex = 1,
+                        rawCommand = cleanInput,
+                        toolName = "executeLearnedSkill",
+                        args = JSONObject().put("skillNameOrTrigger", cleanInput),
+                        assignedAgent = AiAgentRegistry.AUTOMATION_AGENT
+                    )
+                    workingPlan = workingPlan.copy(
+                        primaryAgent = AiAgentRegistry.AUTOMATION_AGENT,
+                        subTasks = listOf(skillStep)
+                    )
+                }
+            }
+
+            if (workingPlan.subTasks.none { it.toolName != null }) {
+                val slotPrompt = detectMissingCommunicationSlot(cleanInput)
+                if (slotPrompt != null) {
+                    _pendingSlotRequest.value = slotPrompt
+                    val res = MasterOrchestrationResult(
+                        success = false,
+                        finalState = "WAITING_FOR_USER",
+                        plan = workingPlan,
+                        executedSteps = emptyList(),
+                        summaryBengali = slotPrompt.promptBn
+                    )
+                    _lastOrchestrationResult.value = res
+                    return res
+                }
+            }
+        }
+
         // 3. No actionable tools found -> report as conversational / guidance needed
-        if (plan.subTasks.none { it.toolName != null }) {
+        if (workingPlan.subTasks.none { it.toolName != null }) {
             val res = MasterOrchestrationResult(
                 success = false,
                 finalState = "CONVERSATIONAL",
-                plan = plan,
+                plan = workingPlan,
                 executedSteps = emptyList(),
                 summaryBengali = "এই নির্দেশের জন্য সরাসরি কোনো ডিভাইস টুল ম্যাচ হয়নি; সাধারণ কথোপকথন বা Gemini Live সেশনে উত্তর দিন।"
             )
@@ -372,7 +684,7 @@ object JarvisMasterOrchestrator {
             val res = MasterOrchestrationResult(
                 success = false,
                 finalState = "FAILED",
-                plan = plan,
+                plan = workingPlan,
                 executedSteps = emptyList(),
                 summaryBengali = "টুল এক্সিকিউটর অনুপস্থিত থাকায় কাজ চালানো সম্ভব হয়নি।"
             )
@@ -385,7 +697,7 @@ object JarvisMasterOrchestrator {
         var anyNeedsConfirmation = false
         var anyNeedsPermission = false
 
-        for (step in plan.subTasks) {
+        for (step in workingPlan.subTasks) {
             val toolName = step.toolName
             if (toolName == null) {
                 completedSubTasks.add(
@@ -409,6 +721,7 @@ object JarvisMasterOrchestrator {
             val statusStr = jsonRes.optString("status", "")
             val ok = jsonRes.optBoolean("success", false)
             val summary = jsonRes.optString("summaryBengali", if (ok) "সম্পন্ন" else "ব্যর্থ")
+            val permReq = jsonRes.optString("permissionRequired", "")
 
             when (statusStr) {
                 "CONFIRMATION_REQUIRED" -> anyNeedsConfirmation = true
@@ -416,13 +729,15 @@ object JarvisMasterOrchestrator {
             }
 
             val stepStatus = when {
+                statusStr == "PERMISSION_REQUIRED" -> "PERMISSION_REQUIRED"
+                statusStr == "CONFIRMATION_REQUIRED" -> "CONFIRMATION_REQUIRED"
                 statusStr == "CANCELLED_BEFORE_DISPATCH" || statusStr == "CANCELLED" -> "CANCELLED"
                 ok -> "SUCCEEDED"
                 else -> "FAILED"
             }
 
             ActiveTaskInterruptionManager.completeTask(activeExecTask.taskId, ok, summary)
-            completedSubTasks.add(step.copy(status = stepStatus, summaryBengali = summary))
+            completedSubTasks.add(step.copy(status = stepStatus, summaryBengali = summary, permissionRequired = permReq))
         }
 
         val succeededCount = completedSubTasks.count { it.status == "SUCCEEDED" }
@@ -455,13 +770,61 @@ object JarvisMasterOrchestrator {
         val finalResult = MasterOrchestrationResult(
             success = finalState == "SUCCEEDED",
             finalState = finalState,
-            plan = plan,
+            plan = workingPlan,
             executedSteps = completedSubTasks,
             summaryBengali = combinedSummary,
             needsConfirmation = anyNeedsConfirmation,
             needsPermission = anyNeedsPermission
         )
         _lastOrchestrationResult.value = finalResult
+        if (finalState in setOf("REQUIRES_PERMISSION", "REQUIRES_CONFIRMATION", "WAITING_FOR_USER", "CONVERSATIONAL", "CANCELLED")) {
+            recentExecutionTimestamps.remove(utteranceKey)
+        }
         return finalResult
+        } finally {
+            releaseCommandSlot(utteranceKey, bypassDedup)
+        }
+    }
+
+    private fun detectMissingCommunicationSlot(cleanInput: String): PendingSlotRequest? {
+        val lower = cleanInput.lowercase(Locale.ROOT).trim()
+        val isGenericCall = lower in listOf(
+            "কল দাও", "ফোন করো", "কল করো", "কাউকে কল দাও", "make a call", "call someone", "call"
+        )
+        if (isGenericCall) {
+            return PendingSlotRequest(
+                intentType = "CALL",
+                partialTool = "makePhoneCall",
+                partialArgs = JSONObject(),
+                missingSlot = "contactName",
+                promptBn = "স্যার, কার কাছে কল করতে চান? কন্টাক্টের নাম বা নম্বর বলুন।"
+            )
+        }
+        val isGenericWhatsApp = lower in listOf(
+            "হোয়াটসঅ্যাপ মেসেজ পাঠাও", "হোয়াটসঅ্যাপ মেসেজ পাঠাও", "হোয়াটসঅ্যাপে মেসেজ দাও",
+            "whatsapp message", "send whatsapp message", "send a whatsapp message"
+        )
+        if (isGenericWhatsApp) {
+            return PendingSlotRequest(
+                intentType = "WHATSAPP",
+                partialTool = "controlWhatsApp",
+                partialArgs = JSONObject(),
+                missingSlot = "contact_and_message",
+                promptBn = "স্যার, হোয়াটসঅ্যাপে কাকে এবং কী বার্তা পাঠাতে চান?"
+            )
+        }
+        val isGenericSms = lower in listOf(
+            "এসএমএস পাঠাও", "মেসেজ পাঠাও", "sms দাও", "send sms", "send a message"
+        )
+        if (isGenericSms) {
+            return PendingSlotRequest(
+                intentType = "SMS",
+                partialTool = "sendSmsMessage",
+                partialArgs = JSONObject(),
+                missingSlot = "phone_and_message",
+                promptBn = "স্যার, কাকে এবং কী এসএমএস পাঠাতে চান?"
+            )
+        }
+        return null
     }
 }

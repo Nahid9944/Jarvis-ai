@@ -610,9 +610,15 @@ object JarvisNlpCommandParser {
         val matchBn2 = ytBnRegex2.find(cleaned)
         if (matchBn2 != null) return matchBn2.groupValues[1].trim()
 
-        // "ইউটিউব ওপেন করে গান চালাও"
-        if ((lower.contains("ইউটিউব") || lower.contains("youtube")) && (lower.contains("চালাও") || lower.contains("play"))) {
-            return cleaned.replace(Regex("ইউটিউব|ইউটিউবে|youtube|চালাও|প্লে করো|play|on|in", RegexOption.IGNORE_CASE), "").trim()
+        // Banglish: "Motu Patlu play করো YouTube-এ" / "YouTube-এ গিয়ে নাটক চালাও"
+        if ((lower.contains("ইউটিউব") || lower.contains("youtube")) && (lower.contains("চালাও") || lower.contains("প্লে") || lower.contains("play") || lower.contains("সার্চ") || lower.contains("search"))) {
+            val extracted = cleaned
+                .replace(Regex("ইউটিউব-এ|ইউটিউবে|ইউটিউব|youtube-এ|youtube-এ|youtube\\s*এ|youtube", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("(?:গিয়ে|গিয়ে|চালাও|প্লে করো|প্লে|সার্চ করো|সার্চ দাও|play করো|play|search|করো|দাও|on|in)", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("^[-–\\s]+|[-–\\s]+$"), "")
+                .replace(Regex("\\s+"), " ")
+                .trim()
+            if (extracted.isNotBlank()) return extracted
         }
 
         return null
@@ -800,26 +806,33 @@ object JarvisNlpCommandParser {
     }
 
     private fun parseOpenAppCommand(cleaned: String, lower: String): String? {
-        // e.g. "ইউটিউব খোলো", "ফেসবুক ওপেন করো", "ক্যামেরা চালু করো"
-        val openAppBnRegex1 = Regex("^(.+?)\\s*(?:অ্যাপ|অ্যাপস)?\\s*(?:ওপেন|চালু|খোলো|খুলুন|অন)\\s*(?:করো|করুন|দাও)?$")
+        fun isReservedDeviceControlTarget(candidate: String): Boolean {
+            val c = candidate.lowercase(java.util.Locale.ROOT).trim()
+            return c in setOf("এই", "আমার", "ফোন", "স্ক্রিন", "screen", "camera", "ক্যামেরা", "front camera", "সামনের ক্যামেরা", "back camera", "flashlight", "ফ্ল্যাশলাইট", "torch", "টর্চ", "টর্চলাইট")
+        }
+
+        // e.g. "ইউটিউব খোলো", "ফেসবুক ওপেন করো", "Instagram open করো", "YouTube launch দাও"
+        val openAppBnRegex1 = Regex("^(.+?)\\s*(?:অ্যাপ|অ্যাপস|app)?\\s*(?:ওপেন|চালু|খোলো|খুলুন|অন|open|launch|start)\\s*(?:করো|করুন|দাও)?$", RegexOption.IGNORE_CASE)
         val matchBn1 = openAppBnRegex1.find(cleaned)
         if (matchBn1 != null) {
             val app = matchBn1.groupValues[1].trim()
-            if (app.isNotBlank() && app != "এই" && app != "আমার") return app
+            if (app.isNotBlank() && !isReservedDeviceControlTarget(app)) return app
         }
 
-        // e.g. "ওপেন করো ইউটিউব", "খোলো ক্যামেরা"
-        val openAppBnRegex2 = Regex("^(?:ওপেন|চালু|খোলো|খুলুন)\\s*(?:করো|করুন)?\\s*(.+)$")
+        // e.g. "ওপেন করো ইউটিউব", "open করো Instagram", "খোলো ফেসবুক"
+        val openAppBnRegex2 = Regex("^(?:ওপেন|চালু|খোলো|খুলুন|open|launch|start)\\s*(?:করো|করুন|দাও)?\\s*(.+)$", RegexOption.IGNORE_CASE)
         val matchBn2 = openAppBnRegex2.find(cleaned)
         if (matchBn2 != null) {
-            return matchBn2.groupValues[1].trim()
+            val app = matchBn2.groupValues[1].trim()
+            if (app.isNotBlank() && !isReservedDeviceControlTarget(app)) return app
         }
 
-        // English: "open YouTube", "launch Camera", "start Facebook"
+        // English: "open YouTube", "launch Facebook", "switch to Instagram"
         val openAppEnRegex = Regex("^(?:open|launch|start|switch to)\\s+(.+)$", RegexOption.IGNORE_CASE)
         val matchEn = openAppEnRegex.find(cleaned)
         if (matchEn != null) {
-            return matchEn.groupValues[1].trim()
+            val app = matchEn.groupValues[1].trim()
+            if (app.isNotBlank() && !isReservedDeviceControlTarget(app)) return app
         }
 
         return null
