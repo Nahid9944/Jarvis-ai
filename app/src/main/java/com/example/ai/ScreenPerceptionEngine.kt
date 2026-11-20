@@ -93,6 +93,30 @@ object ScreenPerceptionEngine {
     }
 
     /**
+     * Computes a deterministic structural hash of visible screen elements, checked states, and foreground app
+     * so automation loops and visual actions can verify genuine UI state transitions.
+     */
+    fun computeScreenHash(screen: ScreenContext): String {
+        if (!screen.accessibilityAvailable || screen.allElements.isEmpty()) {
+            return "NO_UI_${screen.foregroundPackage}"
+        }
+        val signature = buildString {
+            append(screen.foregroundPackage).append('|')
+            append(screen.foregroundActivityOrTitle).append('|')
+            screen.allElements.take(60).forEach { el ->
+                append(el.resourceId).append(':')
+                append(el.text.take(30)).append(':')
+                append(el.contentDescription.take(24)).append(':')
+                append(el.isChecked).append(':')
+                append(el.isSelected).append(';')
+            }
+        }
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(signature.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }.take(24)
+    }
+
+    /**
      * Extracts structured ScreenContext from Accessibility tree and system display state.
      */
     fun inspectCurrentScreen(context: Context, sanitize: Boolean = true): ScreenContext {
@@ -106,7 +130,7 @@ object ScreenPerceptionEngine {
             )
         }
 
-        val root = accessibilityService.rootInActiveWindow
+        val root = accessibilityService.getActiveRootWindowSafe()
         if (root == null) {
             val pkg = JarvisAccessibilityService.currentForegroundApp.value.ifBlank { "UNKNOWN" }
             return ScreenContext(

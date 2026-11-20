@@ -63,7 +63,11 @@ object ToolExecutionPipeline {
             com.example.ai.ExecutionCommitController.cancelAction(actionId)
             ActionApprovalRegistry.cancelAll("জরুরি বিরতি সক্রিয়")
             return@withContext JSONObject().apply {
+                put("executionId", resolvedExecutionId)
+                put("latencyMs", System.currentTimeMillis() - startTime)
                 put("status", "CANCELLED_BEFORE_DISPATCH")
+                put("actionStatus", "CANCELLED_BEFORE_DISPATCH")
+                put("errorCode", "EMERGENCY_STOP_ACTIVE")
                 put("executionState", JarvisActionState.CANCELLED.name)
                 put("success", false)
                 put("verified", false)
@@ -92,7 +96,12 @@ object ToolExecutionPipeline {
                     errorMessage = "Missing permission: ${permissionResult.permissionName}"
                 )
             )
-            return@withContext permissionResult.responseJson
+            return@withContext permissionResult.responseJson.apply {
+                put("executionId", resolvedExecutionId)
+                put("latencyMs", duration)
+                put("errorCode", "PERMISSION_REQUIRED")
+                put("actionStatus", "PERMISSION_REQUIRED")
+            }
         }
 
         // -------------------------------------------------------------
@@ -120,7 +129,12 @@ object ToolExecutionPipeline {
                     errorMessage = "Confirmation required: ${confirmationBlocked.promptBn}"
                 )
             )
-            return@withContext confirmationBlocked.responseJson
+            return@withContext confirmationBlocked.responseJson.apply {
+                put("executionId", resolvedExecutionId)
+                put("latencyMs", duration)
+                put("errorCode", "CONFIRMATION_REQUIRED")
+                put("actionStatus", "CONFIRMATION_REQUIRED")
+            }
         }
 
         if (approvedRecord != null) {
@@ -145,7 +159,11 @@ object ToolExecutionPipeline {
             com.example.ai.ExecutionCommitController.cancelAction(actionId)
             ActionApprovalRegistry.markExecutionFinished(approvedRecord?.approvalId, success = false, verified = false)
             return@withContext JSONObject().apply {
+                put("executionId", resolvedExecutionId)
+                put("latencyMs", System.currentTimeMillis() - startTime)
                 put("status", "CANCELLED_BEFORE_DISPATCH")
+                put("actionStatus", "CANCELLED_BEFORE_DISPATCH")
+                put("errorCode", "INTERRUPTION_CANCELLED")
                 put("executionState", JarvisActionState.CANCELLED.name)
                 put("success", false)
                 put("verified", false)
@@ -178,8 +196,12 @@ object ToolExecutionPipeline {
                 )
             )
             return@withContext JSONObject().apply {
+                put("executionId", resolvedExecutionId)
+                put("latencyMs", duration)
                 put("error", true)
+                put("errorCode", "EXECUTION_EXCEPTION")
                 put("status", "FAILED")
+                put("actionStatus", "FAILED")
                 put("executionState", JarvisActionState.FAILED.name)
                 put("success", false)
                 put("message", "টুল এক্সিকিউশনে সমস্যা: ${e.message}")
@@ -245,6 +267,11 @@ object ToolExecutionPipeline {
             )
         )
 
+        verifiedResult.put("executionId", resolvedExecutionId)
+        verifiedResult.put("latencyMs", duration)
+        if (!verifiedResult.has("actionStatus")) {
+            verifiedResult.put("actionStatus", verifiedResult.optString("status", "UNKNOWN"))
+        }
         return@withContext verifiedResult
     }
 

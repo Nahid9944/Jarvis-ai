@@ -22,6 +22,7 @@ import java.util.concurrent.Executor
 class JarvisAccessibilityService : AccessibilityService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private var screenSummaryJob: Job? = null
 
     companion object {
         private var _instance: JarvisAccessibilityService? = null
@@ -40,6 +41,18 @@ class JarvisAccessibilityService : AccessibilityService() {
          * Listener hook for demonstration learning / skill recording
          */
         var eventListener: ((AccessibilityEvent) -> Unit)? = null
+
+        @androidx.annotation.VisibleForTesting
+        internal var rootWindowOverrideForTest: (() -> AccessibilityNodeInfo?)? = null
+
+        @androidx.annotation.VisibleForTesting
+        internal fun setInstanceForTest(service: JarvisAccessibilityService?) {
+            _instance = service
+            _isServiceActive.value = (service != null)
+            if (service == null) {
+                rootWindowOverrideForTest = null
+            }
+        }
 
         fun isAccessibilityEnabled(context: Context): Boolean {
             val expectedComponentName = "${context.packageName}/${JarvisAccessibilityService::class.java.canonicalName}"
@@ -79,7 +92,8 @@ class JarvisAccessibilityService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
             event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         ) {
-            serviceScope.launch {
+            screenSummaryJob?.cancel()
+            screenSummaryJob = serviceScope.launch {
                 delay(300) // Debounce rapid layout changes
                 val summary = extractVisibleScreenSummary()
                 _currentScreenText.value = summary
@@ -94,13 +108,83 @@ class JarvisAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         _instance = null
         _isServiceActive.value = false
+        screenSummaryJob?.cancel()
         serviceScope.cancel()
         super.onDestroy()
     }
 
     // =================================================================
-    // 1. GESTURE & CLICK DISPATCH
+    // 1. GESTURE & CLICK DISPATCH (Async + Suspend Await Callback)
     // =================================================================
+
+    suspend fun dispatchGestureAwait(gesture: GestureDescription, timeoutMs: Long = 2000L): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
+        return kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+            kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+                val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        super.onCompleted(gestureDescription)
+                        if (cont.isActive) cont.resumeWith(Result.success(true))
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        super.onCancelled(gestureDescription)
+                        if (cont.isActive) cont.resumeWith(Result.success(false))
+                    }
+                }, null)
+                if (!dispatched && cont.isActive) {
+                    cont.resumeWith(Result.success(false))
+                }
+            }
+        } ?: false
+    }
+
+    suspend fun clickCoordinatesAwait(x: Float, y: Float): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
+        val clickPath = Path().apply { moveTo(x, y) }
+        val stroke = GestureDescription.StrokeDescription(clickPath, 0, 50)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return dispatchGestureAwait(gesture)
+    }
+
+    suspend fun swipeAwait(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 300): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
+        val swipePath = Path().apply {
+            moveTo(startX, startY)
+            lineTo(endX, endY)
+        }
+        val stroke = GestureDescription.StrokeDescription(swipePath, 0, durationMs)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return dispatchGestureAwait(gesture, durationMs + 1500L)
+    }
+
+    suspend fun swipeDirectionAwait(direction: String): Boolean {
+        val displayMetrics = resources.displayMetrics
+        val width = displayMetrics.widthPixels.toFloat()
+        val height = displayMetrics.heightPixels.toFloat()
+        val centerX = width / 2f
+        val centerY = height / 2f
+
+        return when (direction.lowercase().trim()) {
+            "up", "swipe_up", "উপরে", "scroll_down", "নিচে নামাও" ->
+                swipeAwait(centerX, centerY + 350f, centerX, centerY - 350f, 250)
+            "down", "swipe_down", "নিচে", "scroll_up", "উপরে তোলো" ->
+                swipeAwait(centerX, centerY - 350f, centerX, centerY + 350f, 250)
+            "left", "swipe_left", "বামে" ->
+                swipeAwait(width * 0.85f, centerY, width * 0.15f, centerY, 250)
+            "right", "swipe_right", "ডানে" ->
+                swipeAwait(width * 0.15f, centerY, width * 0.85f, centerY, 250)
+            else -> false
+        }
+    }
+
+    suspend fun longPressCoordinatesAwait(x: Float, y: Float, durationMs: Long = 600L): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
+        val clickPath = Path().apply { moveTo(x, y) }
+        val stroke = GestureDescription.StrokeDescription(clickPath, 0, durationMs)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        return dispatchGestureAwait(gesture, durationMs + 1500L)
+    }
 
     fun clickCoordinates(x: Float, y: Float, onComplete: ((Boolean) -> Unit)? = null) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) {
@@ -114,7 +198,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         val stroke = GestureDescription.StrokeDescription(clickPath, 0, 50)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
 
-        dispatchGesture(gesture, object : GestureResultCallback() {
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 super.onCompleted(gestureDescription)
                 onComplete?.invoke(true)
@@ -125,6 +209,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 onComplete?.invoke(false)
             }
         }, null)
+        if (!dispatched) onComplete?.invoke(false)
     }
 
     fun swipe(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 300, onComplete: ((Boolean) -> Unit)? = null) {
@@ -140,7 +225,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         val stroke = GestureDescription.StrokeDescription(swipePath, 0, durationMs)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
 
-        dispatchGesture(gesture, object : GestureResultCallback() {
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 super.onCompleted(gestureDescription)
                 onComplete?.invoke(true)
@@ -151,6 +236,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 onComplete?.invoke(false)
             }
         }, null)
+        if (!dispatched) onComplete?.invoke(false)
     }
 
     fun swipeDirection(direction: String, onComplete: ((Boolean) -> Unit)? = null) {
@@ -161,19 +247,28 @@ class JarvisAccessibilityService : AccessibilityService() {
         val centerY = height / 2f
 
         when (direction.lowercase().trim()) {
-            "up", "উপরে", "scroll_down", "নিচে নামাও" -> {
+            "up", "swipe_up", "উপরে", "scroll_down", "নিচে নামাও" -> {
                 swipe(centerX, centerY + 350f, centerX, centerY - 350f, 250, onComplete)
             }
-            "down", "নিচে", "scroll_up", "উপরে তোলো" -> {
+            "down", "swipe_down", "নিচে", "scroll_up", "উপরে তোলো" -> {
                 swipe(centerX, centerY - 350f, centerX, centerY + 350f, 250, onComplete)
             }
-            "left", "বামে" -> {
+            "left", "swipe_left", "বামে" -> {
                 swipe(width * 0.85f, centerY, width * 0.15f, centerY, 250, onComplete)
             }
-            "right", "ডানে" -> {
+            "right", "swipe_right", "ডানে" -> {
                 swipe(width * 0.15f, centerY, width * 0.85f, centerY, 250, onComplete)
             }
             else -> onComplete?.invoke(false)
+        }
+    }
+
+    fun swipe(direction: String): Boolean {
+        return try {
+            swipeDirection(direction)
+            true
+        } catch (_: Exception) {
+            false
         }
     }
 
@@ -189,7 +284,7 @@ class JarvisAccessibilityService : AccessibilityService() {
         val stroke = GestureDescription.StrokeDescription(clickPath, 0, durationMs)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
 
-        dispatchGesture(gesture, object : GestureResultCallback() {
+        val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 super.onCompleted(gestureDescription)
                 onComplete?.invoke(true)
@@ -200,6 +295,7 @@ class JarvisAccessibilityService : AccessibilityService() {
                 onComplete?.invoke(false)
             }
         }, null)
+        if (!dispatched) onComplete?.invoke(false)
     }
 
     fun clickNormalizedCoordinates(normX: Float, normY: Float, onComplete: ((Boolean) -> Unit)? = null) {
@@ -214,6 +310,36 @@ class JarvisAccessibilityService : AccessibilityService() {
     // =================================================================
     // 2. ELEMENT SEARCH & CLICK
     // =================================================================
+
+    fun getActiveRootWindowSafe(): AccessibilityNodeInfo? = rootWindowOverrideForTest?.invoke() ?: rootInActiveWindow
+
+    suspend fun clickElementByTextAwait(targetText: String): Boolean {
+        val root = getActiveRootWindowSafe() ?: return false
+        val systemMatched = try { root.findAccessibilityNodeInfosByText(targetText) } catch (_: Exception) { null }
+        val matchedNodes = if (!systemMatched.isNullOrEmpty()) systemMatched else findNodesRecursive(root) { n ->
+            val t = n.text?.toString().orEmpty()
+            val d = n.contentDescription?.toString().orEmpty()
+            t.contains(targetText, ignoreCase = true) || d.contains(targetText, ignoreCase = true)
+        }
+        if (matchedNodes.isEmpty()) return false
+
+        for (node in matchedNodes) {
+            var current: AccessibilityNodeInfo? = node
+            while (current != null) {
+                if (current.isClickable && current.isEnabled) {
+                    val clicked = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    if (clicked) return true
+                }
+                current = current.parent
+            }
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (bounds.width() > 0 && bounds.height() > 0) {
+                return clickCoordinatesAwait(bounds.exactCenterX(), bounds.exactCenterY())
+            }
+        }
+        return false
+    }
 
     fun clickElementByText(targetText: String): Boolean {
         val root = rootInActiveWindow ?: return false
@@ -262,6 +388,29 @@ class JarvisAccessibilityService : AccessibilityService() {
         return false
     }
 
+    suspend fun longPressElementByTextAwait(targetText: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val matchedNodes = root.findAccessibilityNodeInfosByText(targetText)
+        if (matchedNodes.isNullOrEmpty()) return false
+
+        for (node in matchedNodes) {
+            var current: AccessibilityNodeInfo? = node
+            while (current != null) {
+                if (current.isLongClickable && current.isEnabled) {
+                    val clicked = current.performAction(AccessibilityNodeInfo.ACTION_LONG_CLICK)
+                    if (clicked) return true
+                }
+                current = current.parent
+            }
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (bounds.width() > 0 && bounds.height() > 0) {
+                return longPressCoordinatesAwait(bounds.exactCenterX(), bounds.exactCenterY(), 600L)
+            }
+        }
+        return false
+    }
+
     fun longPressElementByText(targetText: String, onComplete: ((Boolean) -> Unit)? = null): Boolean {
         val root = rootInActiveWindow ?: return false
         val matchedNodes = root.findAccessibilityNodeInfosByText(targetText)
@@ -294,6 +443,16 @@ class JarvisAccessibilityService : AccessibilityService() {
         return false
     }
 
+    fun clearText(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val targetNode = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findFirstEditableNode(root) ?: return false
+        targetNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val clearArgs = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
+        }
+        return targetNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
+    }
+
     fun clearInputAndType(textToType: String): Boolean {
         val root = rootInActiveWindow ?: return false
         val targetNode = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: findFirstEditableNode(root) ?: return false
@@ -323,6 +482,47 @@ class JarvisAccessibilityService : AccessibilityService() {
         return null
     }
 
+    private fun findNodesRecursive(
+        node: AccessibilityNodeInfo?,
+        depth: Int = 0,
+        predicate: (AccessibilityNodeInfo) -> Boolean
+    ): List<AccessibilityNodeInfo> {
+        if (node == null || depth > 16) return emptyList()
+        val out = mutableListOf<AccessibilityNodeInfo>()
+        if (predicate(node)) out.add(node)
+        for (i in 0 until node.childCount) {
+            out.addAll(findNodesRecursive(node.getChild(i), depth + 1, predicate))
+        }
+        return out
+    }
+
+    suspend fun clickElementByIdAwait(viewId: String): Boolean {
+        val root = getActiveRootWindowSafe() ?: return false
+        val systemMatched = try { root.findAccessibilityNodeInfosByViewId(viewId) } catch (_: Exception) { null }
+        val matchedNodes = if (!systemMatched.isNullOrEmpty()) systemMatched else findNodesRecursive(root) { n ->
+            val vid = n.viewIdResourceName.orEmpty()
+            vid.equals(viewId, ignoreCase = true) || vid.endsWith("/$viewId", ignoreCase = true)
+        }
+        if (matchedNodes.isEmpty()) return false
+
+        for (node in matchedNodes) {
+            var current: AccessibilityNodeInfo? = node
+            while (current != null) {
+                if (current.isClickable && current.isEnabled) {
+                    val clicked = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    if (clicked) return true
+                }
+                current = current.parent
+            }
+            val bounds = Rect()
+            node.getBoundsInScreen(bounds)
+            if (bounds.width() > 0 && bounds.height() > 0) {
+                return clickCoordinatesAwait(bounds.exactCenterX(), bounds.exactCenterY())
+            }
+        }
+        return false
+    }
+
     fun clickElementById(viewId: String): Boolean {
         val root = rootInActiveWindow ?: return false
         val matchedNodes = root.findAccessibilityNodeInfosByViewId(viewId)
@@ -348,13 +548,51 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     fun findAccessibilityNodeByTextOrId(query: String): AccessibilityNodeInfo? {
-        val root = rootInActiveWindow ?: return null
+        val root = getActiveRootWindowSafe() ?: return null
         if (query.isBlank()) return null
         val byId = try { root.findAccessibilityNodeInfosByViewId(query) } catch (_: Exception) { null }
         if (!byId.isNullOrEmpty()) return byId.first()
         val byText = try { root.findAccessibilityNodeInfosByText(query) } catch (_: Exception) { null }
         if (!byText.isNullOrEmpty()) return byText.first()
         return null
+    }
+
+    fun findUiElement(query: String): AccessibilityNodeInfo? = findAccessibilityNodeByTextOrId(query)
+
+    suspend fun waitForElement(
+        query: String,
+        timeoutMs: Long = 3000L,
+        pollIntervalMs: Long = 200L
+    ): AccessibilityNodeInfo? {
+        if (query.isBlank()) return null
+        val deadline = System.currentTimeMillis() + timeoutMs.coerceIn(200L, 15_000L)
+        val step = pollIntervalMs.coerceIn(50L, 1000L)
+        while (true) {
+            findUiElement(query)?.let { return it }
+            if (System.currentTimeMillis() >= deadline) return null
+            kotlinx.coroutines.delay(step)
+        }
+    }
+
+    fun verifyScreenState(
+        expectedPackage: String? = null,
+        expectedText: String? = null,
+        forbiddenText: String? = null
+    ): Boolean {
+        val root = rootInActiveWindow ?: return false
+        if (!expectedPackage.isNullOrBlank()) {
+            val fgPkg = root.packageName?.toString().orEmpty()
+            if (!fgPkg.contains(expectedPackage.trim(), ignoreCase = true)) {
+                return false
+            }
+        }
+        if (!expectedText.isNullOrBlank()) {
+            if (findUiElement(expectedText) == null) return false
+        }
+        if (!forbiddenText.isNullOrBlank()) {
+            if (findUiElement(forbiddenText) != null) return false
+        }
+        return true
     }
 
     // =================================================================
@@ -382,6 +620,17 @@ class JarvisAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return false
         val scrollable = findFirstScrollableNode(root)
         return scrollable?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD) ?: false
+    }
+
+    suspend fun scrollHorizontalAwait(forward: Boolean = true): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val scrollable = findFirstScrollableNode(root)
+        val action = if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        val performed = scrollable?.performAction(action) ?: false
+        if (performed) return true
+
+        val direction = if (forward) "left" else "right"
+        return swipeDirectionAwait(direction)
     }
 
     fun scrollHorizontal(forward: Boolean = true): Boolean {

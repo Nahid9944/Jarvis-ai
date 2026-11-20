@@ -130,7 +130,14 @@ object WhatsAppPlaybooks {
                 dangerous = true
             )
         ),
-        verify = VerifySpec(type = VerifyType.SCREEN_HASH_CHANGED)
+        verify = VerifySpec(
+            type = VerifyType.NODE_EXISTS,
+            selector = Selector(
+                by = By.ID,
+                value = "com.whatsapp:id/end_call_btn",
+                alts = listOf("End call", "কল শেষ করুন", "Ringing", "Calling", "Connecting", "Mute", "Speaker")
+            )
+        )
     )
 
     val VIDEO_CALL = Playbook(
@@ -161,7 +168,14 @@ object WhatsAppPlaybooks {
                 dangerous = true
             )
         ),
-        verify = VerifySpec(type = VerifyType.SCREEN_HASH_CHANGED)
+        verify = VerifySpec(
+            type = VerifyType.NODE_EXISTS,
+            selector = Selector(
+                by = By.ID,
+                value = "com.whatsapp:id/end_call_btn",
+                alts = listOf("End call", "কল শেষ করুন", "Ringing", "Calling", "Connecting", "Mute", "Speaker")
+            )
+        )
     )
 
     val END_CALL = Playbook(

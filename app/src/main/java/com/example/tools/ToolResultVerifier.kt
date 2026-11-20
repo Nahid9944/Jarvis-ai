@@ -27,28 +27,35 @@ object ToolResultVerifier {
                 "PARAMETERS_REQUIRED",
                 "OFFLINE_LIMITED",
                 "UNSUPPORTED",
-                "AWAITING_PROJECTION_CONSENT"
+                "AWAITING_PROJECTION_CONSENT",
+                "LOCATION_UNRESOLVED"
             )
         ) {
             rawResult.put("verified", false)
             rawResult.put("verificationStatus", status)
+            rawResult.put("actionStatus", rawResult.optString("actionStatus", status))
             if (status == "CANCELLED_BEFORE_DISPATCH" || status == "UNSUPPORTED" || status == "OFFLINE_LIMITED") {
                 rawResult.put("success", false)
+                if (!rawResult.has("errorCode")) rawResult.put("errorCode", status)
             }
             return rawResult
         }
 
-        // Check for explicit error flags
+        // Check for explicit error flags or LOCATION_NOT_FOUND
         val isExplicitError = rawResult.optBoolean("error", false) ||
                 status == "FAILED" ||
                 status == "ERROR" ||
                 status == "NOT_IMPLEMENTED" ||
+                rawResult.optString("errorCode") == "LOCATION_NOT_FOUND" ||
                 rawResult.has("exception") ||
                 (rawResult.has("error") && rawResult.opt("error") !is Boolean && rawResult.optString("error").isNotBlank())
 
         if (isExplicitError) {
             rawResult.put("success", false)
             rawResult.put("verified", false)
+            rawResult.put("status", "FAILED")
+            rawResult.put("actionStatus", rawResult.optString("actionStatus", "FAILED"))
+            if (!rawResult.has("errorCode")) rawResult.put("errorCode", "EXECUTION_FAILED")
             rawResult.put("verificationStatus", "VERIFICATION_FAILED")
             rawResult.put("verificationDetails", rawResult.optString("summaryBengali", rawResult.optString("message", "টুল এক্সিকিউশনে ত্রুটি পাওয়া গেছে।")))
             return rawResult
@@ -69,8 +76,8 @@ object ToolResultVerifier {
                 }
             }
 
-            // 2. Skills & Tutorial/Repo Imports
-            toolName in listOf("executeLearnedSkill", "importSkillFromYouTube", "importSkillFromGitHub") -> {
+            // 2. Skills & Tutorial/Repo/Text Learning Imports
+            toolName in listOf("executeLearnedSkill", "importSkillFromYouTube", "importSkillFromGitHub", "learnFromText") -> {
                 val hasExplicitSuccess = rawResult.optBoolean("success", false)
                 val statusStr = rawResult.optString("status", "")
                 when {
@@ -195,7 +202,9 @@ object ToolResultVerifier {
                                 rawResult.has("durationSeconds") ||
                                 rawResult.has("connected") ||
                                 rawResult.has("appPackage") ||
-                                rawResult.has("data"))
+                                rawResult.has("data") ||
+                                rawResult.has("progressPercent") ||
+                                rawResult.has("projectHealthScore"))
                 if (validData) {
                     Pair(true, "অনুরোধকৃত তথ্য সফলভাবে সংগৃহীত ও আউটপুট যাচাই করা হয়েছে।")
                 } else {

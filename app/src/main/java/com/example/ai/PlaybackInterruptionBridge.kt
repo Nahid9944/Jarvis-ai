@@ -29,6 +29,8 @@ object PlaybackInterruptionBridge {
         sessionManagerRef = null
     }
 
+    fun activeSessionManager(): GeminiLiveSessionManager? = sessionManagerRef
+
     /**
      * Instantly halts audio output playback, flushes audio buffers, and transitions
      * session state back to LISTENING without breaking WebSocket or session lifecycle.

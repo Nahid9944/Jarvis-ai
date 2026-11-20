@@ -15,7 +15,8 @@ data class AiAgent(
     val color: Color,
     val description: String,
     val samplePrompts: List<String>,
-    val systemPromptExtension: String
+    val systemPromptExtension: String,
+    val isController: Boolean = false
 )
 
 object AiAgentRegistry {
@@ -23,17 +24,18 @@ object AiAgentRegistry {
         id = "jarvis_master",
         name = "J.A.R.V.I.S. Prime OS",
         titleBengali = "জারভিস প্রাইম ওএস",
-        roleBengali = "সুপিরিয়র পার্সোনাল এআই ওএস কমান্ডার",
+        roleBengali = "সেন্ট্রাল ব্রেইন ও সুপিরিয়র কন্ট্রোলার",
         icon = Icons.Default.SmartToy,
         color = Color(0xFF00F5D4),
-        description = "আয়রন ম্যান জারভিসের মূল কেন্দ্রীয় কমান্ড সিস্টেম। সার্বক্ষণিক ভয়েস ইন্টারঅ্যাকশন, সিস্টেম টেলিমেট্রি, মেমোরি এবং যেকোনো জটিল প্রশ্নের সমাধান।",
+        description = "আয়রন ম্যান জারভিসের মূল কেন্দ্রীয় কমান্ড সিস্টেম ও কন্ট্রোলার ব্রেইন। ভাষা বোঝা, কনটেক্সট, মেমোরি, রিস্ক গেট এবং সকল স্পেশালিস্ট এজেন্ট পরিচালনা করে।",
         samplePrompts = listOf(
             "জারভিস, সিস্টেম ডায়াগনস্টিক রিপোর্ট দাও",
             "আমার ফোনের ব্যাটারি ও মেমোরি স্ট্যাটাস কেমন?",
             "কাল সকাল ৮টায় গুরুত্বপূর্ণ প্রোটোকল রিমাইন্ডার সেট করো",
             "মনে রাখো, আমার প্রিয় কোডিং ল্যাঙ্গুয়েজ Kotlin"
         ),
-        systemPromptExtension = "You are operating as J.A.R.V.I.S. Prime — the master Iron Man artificial intelligence operating system. Address the user with supreme respect as 'Sir' (or স্যার). Provide crisp, witty, highly intelligent, and instant answers in elegant Bengali and English."
+        systemPromptExtension = "You are operating as J.A.R.V.I.S. Prime — the Central Master Brain and supreme controller of NAHID AI OS. Address the user with supreme respect as 'Sir' (or স্যার). Coordinate specialist agents without surrendering master governance, verify facts and actions truthfully, and respond naturally in Bengali, Banglish, or English.",
+        isController = true
     )
 
     val FRIDAY_AGENT = AiAgent(
@@ -74,17 +76,17 @@ object AiAgentRegistry {
         id = "homer_agent",
         name = "H.O.M.E.R. Research Core",
         titleBengali = "হোমার সায়েন্স ও কোডিং রিসার্চার",
-        roleBengali = "বিজ্ঞান, গণিত, কোডিং ও বহির্বিশ্ব অনুসন্ধান",
+        roleBengali = "বিজ্ঞান, গণিত, কোডিং ও টেকনিক্যাল এনালাইসিস",
         icon = Icons.Default.Terminal,
         color = Color(0xFFF15BB5),
-        description = "জটিল অ্যালগরিদম, অ্যান্ড্রয়েড ডেভেলপমেন্ট কোড, মহাকাশ বিজ্ঞান, গণিত ও গুগল সার্চ রিসার্চ।",
+        description = "জটিল অ্যালগরিদম, অ্যান্ড্রয়েড ডেভেলপমেন্ট কোড, মহাকাশ বিজ্ঞান, গণিত ও ইউটিউব/গিটহাব টেকনিক্যাল বিশ্লেষণ।",
         samplePrompts = listOf(
             "জেটপ্যাক কম্পোজে একটি কাস্টম ক্যানভাস অ্যানিমেশনের কোড দাও",
             "কোয়ান্টাম কম্পিউটিং কীভাবে ক্লাসিক্যাল কম্পিউটারের চেয়ে ভিন্ন?",
-            "আজকের বিশ্বের গুরুত্বপূর্ণ প্রযুক্তি সংবাদ সংক্ষেপে বলো",
-            "একটি পারফেক্ট পাইথন স্ক্রিপ্ট দিয়ে ওয়েব স্ক্র্যাপিং করে দেখাও"
+            "গিটহাবের ওপেন সোর্স প্রজেক্ট কীভাবে ইন্টিগ্রেট করবো?",
+            "একটি পারফেক্ট পাইথন স্ক্রিপ্ট দিয়ে ডাটা প্রসেসিং দেখাও"
         ),
-        systemPromptExtension = "You are operating as H.O.M.E.R. — the advanced engineering, science, and coding cognitive intelligence. Provide precise code snippets, deep logical breakdowns, scientific reasoning, and web knowledge."
+        systemPromptExtension = "You are operating as H.O.M.E.R. — the advanced engineering, science, and coding cognitive intelligence. Provide precise code snippets, deep logical breakdowns, and scientific reasoning."
     )
 
     val VISION_AGENT = AiAgent(
@@ -218,6 +220,40 @@ object AiAgentRegistry {
         systemPromptExtension = "You are T.A.S.K. Master — routine and reminder orchestrator. Schedule exact alarms, execute morning/night routines, and keep the user punctual."
     )
 
+    val HOME_DEVELOPER = AiAgent(
+        id = "home_developer",
+        name = "H.O.M.E. Developer Core",
+        titleBengali = "হোম ডেভেলপার এজেন্ট",
+        roleBengali = "অটোনোমাস স্কিল ফ্যাক্টরি, কোড ও সেল্ফ-রিপেয়ার আর্কিটেক্ট",
+        icon = Icons.Default.Code,
+        color = Color(0xFF00F5D4),
+        description = "ইউটিউব, গিটহাব, টেক্সট, ভয়েস, ডকুমেন্ট ও স্ক্রিনশট থেকে নিরাপদ স্কিল তৈরি, সক্ষমতার ঘাটতি শনাক্ত, বহুভাষিক কোড প্যাচ ও ওয়েব অ্যাপ ওয়ার্কস্পেস নির্মাণ এবং চেকপয়েন্ট-সহ স্টপ/রিজিউম।",
+        samplePrompts = listOf(
+            "HOME DEVELOPER এখন কী করছ এবং কাজ কতদূর?",
+            "সেল্ফ রিপেয়ার ও সক্ষমতা অডিট চালাও",
+            "এই গিটহাব প্রোজেক্ট বিশ্লেষণ করে ইন্টিগ্রেশন প্রস্তাব বানাও",
+            "একটি বাংলা টাস্ক ম্যানেজার ওয়েব অ্যাপ ওয়ার্কস্পেস তৈরি করো"
+        ),
+        systemPromptExtension = "You are HOME DEVELOPER Agent inside NAHID AI OS. Follow strict platform truth: report 0% progress when idle, block unsafe dynamic code loading or hardcoded secrets, mark native code patches as NOT_COMPILED_REQUIRES_BUILD, and support cooperative pause/resume checkpoints."
+    )
+
+    val INTELLIGENT_AGENT = AiAgent(
+        id = "intelligent_agent",
+        name = "I.N.T.E.L.L.I.G.E.N.T. Knowledge Core",
+        titleBengali = "ইন্টেলিজেন্ট নলেজ ও ডিপ রিসার্চ এজেন্ট",
+        roleBengali = "ফাস্ট-ফার্স্ট জ্ঞান পুনরুদ্ধার, সরকারি-সায়েন্টিফিক ডাটা ও ক্রস-ভেরিফায়েড গবেষণা",
+        icon = Icons.Default.TravelExplore,
+        color = Color(0xFF22D3EE),
+        description = "JARVIS_MASTER-এর অধীনে L1/L2/L3/L4 ফাস্ট-ফার্স্ট নলেজ রাউটিং, বহু-উৎস প্যারালাল রিসার্চ, ক্লেইম-লেভেল প্রমাণ যাচাই এবং প্রমাণ-ভিত্তিক বাংলা উত্তর সংশ্লেষণ।",
+        samplePrompts = listOf(
+            "বাংলাদেশের সর্বশেষ অর্থনৈতিক ও সরকারি নীতিমালা যাচাই করে বলো",
+            "আজকের বিশ্বের গুরুত্বপূর্ণ তাজা খবর ও প্রযুক্তি আপডেট দাও",
+            "এই বিষয়টি একাধিক নির্ভরযোগ্য ওয়েব সূত্র থেকে ক্রস-চেক করো",
+            "ডেঙ্গু বা স্বাস্থ্য সংক্রান্ত অফিসিয়াল গাইডলাইন কী বলছে?"
+        ),
+        systemPromptExtension = "You are I.N.T.E.L.L.I.G.E.N.T. — dedicated Knowledge Retrieval and Deep Research specialist operating under JARVIS_MASTER. Follow fast-first retrieval (L1 -> L2 -> L3 -> L4 bounded parallel search), attach canonical URLs, report claim-level verification status honestly (VERIFIED only with >=2 independent corroborated domains; otherwise SINGLE_SOURCE_ONLY / CONFLICTING / UNVERIFIED), and never fabricate facts or citations."
+    )
+
     val ALL_AGENTS = listOf(
         JARVIS_MASTER,
         FRIDAY_AGENT,
@@ -230,7 +266,9 @@ object AiAgentRegistry {
         AUTOMATION_AGENT,
         MEMORY_AGENT,
         SECURITY_AGENT,
-        TASK_AGENT
+        TASK_AGENT,
+        HOME_DEVELOPER,
+        INTELLIGENT_AGENT
     )
 
     fun getAgentById(id: String?): AiAgent {

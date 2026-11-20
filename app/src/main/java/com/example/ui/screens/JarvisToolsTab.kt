@@ -64,11 +64,16 @@ fun JarvisToolsTab(
     val pendingAnnouncements by viewModel.pendingAnnouncements.collectAsState()
     val latestSmsStatus by viewModel.latestSmsStatus.collectAsState()
 
-    // Teach Mode / GitHub / YouTube Learning Dialogs
+    // Teach Mode / GitHub / YouTube / Text Learning Dialogs
     var showTeachSkillDialog by remember { mutableStateOf(false) }
     var showGitHubImportDialog by remember { mutableStateOf(false) }
     var showYouTubeImportDialog by remember { mutableStateOf(false) }
+    var showTextLearningDialog by remember { mutableStateOf(false) }
     var learningStatusMessage by remember { mutableStateOf<String?>(null) }
+    val toolTelemetry by viewModel.toolTelemetry.collectAsState()
+    val knowledgeStatus by viewModel.knowledgeSystemStatus.collectAsState()
+    var knowledgeProbeQuery by remember { mutableStateOf("") }
+    val dhakaDateInfo = remember { com.example.util.BangladeshCalendarAndGeoEngine.getCurrentDhakaDateTimeReport() }
 
     // Weather Tool State
     var weatherLocation by remember { mutableStateOf("ঢাকা") }
@@ -128,6 +133,212 @@ fun JarvisToolsTab(
                             fontSize = 11.5.sp,
                             color = TextDim
                         )
+                    }
+                }
+            }
+        }
+
+        // LIVE EXECUTION DASHBOARD & REVISED BANGLADESH CALENDAR
+        item {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = CardBg,
+                border = BorderStroke(1.2.dp, EmeraldNeon.copy(alpha = 0.65f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("tools_live_execution_dashboard")
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "লাইভ এক্সিকিউশন ও বাংলাদেশ বর্ষপঞ্জি",
+                            color = EmeraldNeon,
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${dhakaDateInfo.optString("weekdayBengali")} • ${dhakaDateInfo.optString("timeBengali")}",
+                            color = CyanNeon,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+                    Text(
+                        text = "বাংলা তারিখ: ${dhakaDateInfo.optString("banglaFormatted")}",
+                        color = TextWhite,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    if (toolTelemetry.isEmpty()) {
+                        Text(
+                            text = "সাম্প্রতিক টুল এক্সিকিউশন: এখনো কোনো অ্যাকশন চালানো হয়নি।",
+                            color = TextDim,
+                            fontSize = 11.sp
+                        )
+                    } else {
+                        toolTelemetry.take(3).forEach { entry ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = SpaceSurface,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "${entry.toolName} (${entry.status})",
+                                        color = if (entry.status == "SUCCEEDED") CyanNeon else AmberGlow,
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        text = "${entry.durationMs}ms",
+                                        color = TextDim,
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // KNOWLEDGE SYSTEM STATUS CARD (JARVIS_MASTER + INTELLIGENT_AGENT)
+        item {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = CardBg,
+                border = BorderStroke(1.2.dp, BlueHolo.copy(alpha = 0.65f)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("knowledge_system_status_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(Icons.Default.TravelExplore, contentDescription = "নলেজ ইঞ্জিন", tint = BlueHolo, modifier = Modifier.size(20.dp))
+                            Text(
+                                text = "নলেজ ও ডিপ রিসার্চ স্ট্যাটাস",
+                                color = BlueHolo,
+                                fontSize = 13.5.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Text(
+                            text = "${knowledgeStatus.cacheTierReached.name} • ${knowledgeStatus.evidenceStatus.name}",
+                            color = CyanNeon,
+                            fontSize = 10.5.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
+
+                    Text(
+                        text = "ব্রেইন: ${knowledgeStatus.controllerAgentName} | স্পেশালিস্ট: ${knowledgeStatus.specialistAgentName}",
+                        color = TextWhite,
+                        fontSize = 11.5.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "মোড: ${knowledgeStatus.activeMode.name} | স্টোরেজ: ${knowledgeStatus.storageState.name} | সার্ভার: ${knowledgeStatus.serverConnectionState}",
+                        color = TextDim,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "L1 হিট: ${knowledgeStatus.l1HitCount} | L2 ক্যাশ: ${knowledgeStatus.l2EntryCount} | ল্যাটেন্সি: ${knowledgeStatus.lastLatencyMs}ms | ডাটা: ${knowledgeStatus.lastBytesTransferred}B",
+                        color = TextDim,
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = knowledgeStatus.statusNoteBn,
+                        color = AmberGlow,
+                        fontSize = 11.5.sp
+                    )
+
+                    OutlinedTextField(
+                        value = knowledgeProbeQuery,
+                        onValueChange = { knowledgeProbeQuery = it },
+                        label = { Text("দ্রুত প্রশ্ন বা রিসার্চ টপিক লিখুন", fontSize = 11.5.sp) },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("knowledge_probe_input"),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = BlueHolo,
+                            unfocusedBorderColor = TextDim.copy(alpha = 0.4f),
+                            focusedTextColor = TextWhite,
+                            unfocusedTextColor = TextWhite
+                        )
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = {
+                                val q = knowledgeProbeQuery.trim().ifBlank { "Bangladesh digital economy statistics" }
+                                viewModel.runKnowledgeQueryFromUi(q, deepResearch = false)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("knowledge_run_fast_btn"),
+                            colors = ButtonDefaults.buttonColors(containerColor = BlueHolo, contentColor = SpaceDark)
+                        ) {
+                            Text("ফাস্ট কুয়েরি", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Button(
+                            onClick = {
+                                val q = knowledgeProbeQuery.trim().ifBlank { "Bangladesh digital economy statistics" }
+                                viewModel.runKnowledgeQueryFromUi(q, deepResearch = true)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("knowledge_run_deep_btn"),
+                            colors = ButtonDefaults.buttonColors(containerColor = EmeraldNeon, contentColor = SpaceDark)
+                        ) {
+                            Text("ডিপ রিসার্চ", fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                        OutlinedButton(
+                            onClick = { viewModel.cancelActiveKnowledgeResearch() },
+                            enabled = knowledgeStatus.isResearchRunning,
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("knowledge_cancel_btn"),
+                            border = BorderStroke(1.dp, AmberGlow.copy(alpha = 0.7f))
+                        ) {
+                            Text("বাতিল", color = AmberGlow, fontSize = 11.5.sp)
+                        }
                     }
                 }
             }
@@ -770,6 +981,21 @@ fun JarvisToolsTab(
                         }
                     }
 
+                    Button(
+                        onClick = { showTextLearningDialog = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = EmeraldNeon.copy(alpha = 0.16f)),
+                        border = BorderStroke(1.dp, EmeraldNeon),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("tools_text_learning_button")
+                    ) {
+                        Icon(Icons.Default.EditNote, contentDescription = null, tint = EmeraldNeon, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("টেক্সট লার্নিং ওয়ার্কস্পেস (মেমোরি / রুটিন / স্কিল ড্রাফট)", color = EmeraldNeon, fontWeight = FontWeight.Bold, fontSize = 11.5.sp)
+                    }
+
                     if (!learningStatusMessage.isNullOrBlank()) {
                         Surface(
                             color = SpaceSurface,
@@ -1176,6 +1402,76 @@ fun JarvisToolsTab(
             },
             dismissButton = {
                 TextButton(onClick = { showYouTubeImportDialog = false }) { Text("বাতিল", color = TextDim) }
+            }
+        )
+    }
+
+    if (showTextLearningDialog) {
+        var learnTitle by remember { mutableStateOf("") }
+        var learnBody by remember { mutableStateOf("") }
+        var previewStatus by remember { mutableStateOf<String?>(null) }
+        AlertDialog(
+            onDismissRequest = { showTextLearningDialog = false },
+            containerColor = CardBg,
+            title = { Text("টেক্সট লার্নিং ওয়ার্কস্পেস", color = TextWhite, fontWeight = FontWeight.Bold, fontSize = 16.sp) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = learnTitle,
+                        onValueChange = { learnTitle = it },
+                        label = { Text("শিরোনাম (ঐচ্ছিক)") },
+                        singleLine = true,
+                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = TextWhite, unfocusedTextColor = TextWhite)
+                    )
+                    OutlinedTextField(
+                        value = learnBody,
+                        onValueChange = { learnBody = it },
+                        label = { Text("বাংলা, বাংলিশ বা ইংরেজিতে নিয়ম/রুটিন/ধাপ লিখুন") },
+                        placeholder = { Text("যেমন: প্রতিদিন সকাল ৮টায় আবহাওয়া জানাও অথবা WhatsApp খোলো -> Send ক্লিক করো", fontSize = 11.sp) },
+                        minLines = 3,
+                        colors = OutlinedTextFieldDefaults.colors(focusedTextColor = TextWhite, unfocusedTextColor = TextWhite)
+                    )
+                    if (!previewStatus.isNullOrBlank()) {
+                        Text(previewStatus ?: "", color = EmeraldNeon, fontSize = 11.5.sp)
+                    }
+                    OutlinedButton(
+                        enabled = learnBody.isNotBlank(),
+                        border = BorderStroke(1.dp, BlueHolo),
+                        onClick = {
+                            viewModel.learnFromTextWorkspace(
+                                instructionText = learnBody,
+                                title = learnTitle,
+                                dryRunOnly = true
+                            ) { res ->
+                                previewStatus = res.optString("summaryBengali", "ড্রাই-রান সম্পন্ন")
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) {
+                        Text("ড্রাই-রান যাচাই করুন", color = BlueHolo, fontWeight = FontWeight.Bold)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = learnBody.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = EmeraldNeon),
+                    onClick = {
+                        viewModel.learnFromTextWorkspace(
+                            instructionText = learnBody,
+                            title = learnTitle,
+                            dryRunOnly = false
+                        ) { res ->
+                            val msg = res.optString("summaryBengali", "টেক্সট লার্নিং সংরক্ষিত হয়েছে")
+                            learningStatusMessage = "[Text Workspace: ${res.optString("classification")}] $msg"
+                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                            showTextLearningDialog = false
+                        }
+                    }
+                ) { Text("সংরক্ষণ করুন", color = SpaceDark, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTextLearningDialog = false }) { Text("বাতিল", color = TextDim) }
             }
         )
     }

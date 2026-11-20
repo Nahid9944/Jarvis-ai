@@ -30,9 +30,16 @@ import kotlinx.coroutines.launch
         EmotionHistoryEntity::class,
         ActionApprovalAuditEntity::class,
         TrustedLowRiskRuleEntity::class,
-        ArtifactEntity::class
+        ArtifactEntity::class,
+        DevTaskEntity::class,
+        DevActivityLogEntity::class,
+        DevPatchHistoryEntity::class,
+        CapabilityGapEntity::class,
+        SkillEvidenceEntity::class,
+        KnowledgeCacheEntity::class,
+        KnowledgeTelemetryEntity::class
     ],
-    version = 20,
+    version = 22,
     exportSchema = false
 )
 abstract class AssistantDatabase : RoomDatabase() {
@@ -40,6 +47,8 @@ abstract class AssistantDatabase : RoomDatabase() {
     abstract fun jarvisMemoryDao(): JarvisMemoryDao
     abstract fun jarvisSkillDao(): JarvisSkillDao
     abstract fun companionDao(): CompanionDao
+    abstract fun homeDeveloperDao(): HomeDeveloperDao
+    abstract fun knowledgeDao(): KnowledgeDao
 
     companion object {
         @Volatile
@@ -238,6 +247,171 @@ abstract class AssistantDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_20_21 = object : androidx.room.migration.Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS dev_tasks (
+                        taskId TEXT NOT NULL PRIMARY KEY,
+                        goal TEXT NOT NULL,
+                        category TEXT NOT NULL DEFAULT 'FEATURE',
+                        priority TEXT NOT NULL DEFAULT 'NORMAL',
+                        phase TEXT NOT NULL DEFAULT 'IDLE',
+                        status TEXT NOT NULL DEFAULT 'QUEUED',
+                        autonomyLevel TEXT NOT NULL DEFAULT 'L2_SAFE_AUTONOMOUS',
+                        currentStepIndex INTEGER NOT NULL DEFAULT 0,
+                        totalSteps INTEGER NOT NULL DEFAULT 0,
+                        completedStepsJson TEXT NOT NULL DEFAULT '[]',
+                        pendingStepsJson TEXT NOT NULL DEFAULT '[]',
+                        failedStepsJson TEXT NOT NULL DEFAULT '[]',
+                        currentFileOrTarget TEXT NOT NULL DEFAULT '',
+                        learningSource TEXT NOT NULL DEFAULT '',
+                        learningSourceUrl TEXT NOT NULL DEFAULT '',
+                        draftSkillId TEXT NOT NULL DEFAULT '',
+                        workingArtifactId INTEGER NOT NULL DEFAULT 0,
+                        pauseReason TEXT NOT NULL DEFAULT '',
+                        lastError TEXT NOT NULL DEFAULT '',
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        completedAt INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_dev_tasks_status ON dev_tasks(status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_dev_tasks_priority ON dev_tasks(priority)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_dev_tasks_updatedAt ON dev_tasks(updatedAt)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS dev_activity_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        taskId TEXT NOT NULL DEFAULT '',
+                        phase TEXT NOT NULL DEFAULT 'IDLE',
+                        eventType TEXT NOT NULL DEFAULT 'STATUS',
+                        messageBn TEXT NOT NULL,
+                        details TEXT NOT NULL DEFAULT '',
+                        severity TEXT NOT NULL DEFAULT 'INFO',
+                        timestamp INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_dev_activity_logs_taskId ON dev_activity_logs(taskId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_dev_activity_logs_timestamp ON dev_activity_logs(timestamp)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS dev_patch_history (
+                        patchId TEXT NOT NULL PRIMARY KEY,
+                        taskId TEXT NOT NULL DEFAULT '',
+                        targetFile TEXT NOT NULL,
+                        language TEXT NOT NULL DEFAULT 'KOTLIN',
+                        summaryBn TEXT NOT NULL,
+                        patchContent TEXT NOT NULL,
+                        previousSnapshot TEXT NOT NULL DEFAULT '',
+                        securityStatus TEXT NOT NULL DEFAULT 'PASS',
+                        compileStatus TEXT NOT NULL DEFAULT 'NOT_COMPILED_REQUIRES_BUILD',
+                        status TEXT NOT NULL DEFAULT 'DRAFT',
+                        artifactId INTEGER NOT NULL DEFAULT 0,
+                        createdAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_dev_patch_history_taskId ON dev_patch_history(taskId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_dev_patch_history_status ON dev_patch_history(status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_dev_patch_history_updatedAt ON dev_patch_history(updatedAt)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS capability_gaps (
+                        gapId TEXT NOT NULL PRIMARY KEY,
+                        titleBn TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        severity TEXT NOT NULL DEFAULT 'MEDIUM',
+                        sourceEvidence TEXT NOT NULL,
+                        resolutionType TEXT NOT NULL DEFAULT 'SKILL_CREATE',
+                        status TEXT NOT NULL DEFAULT 'OPEN',
+                        linkedTaskId TEXT NOT NULL DEFAULT '',
+                        detectedAt INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capability_gaps_status ON capability_gaps(status)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_capability_gaps_severity ON capability_gaps(severity)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS skill_evidence (
+                        skillId TEXT NOT NULL PRIMARY KEY,
+                        sourceType TEXT NOT NULL,
+                        sourceUrl TEXT NOT NULL DEFAULT '',
+                        learnedAt INTEGER NOT NULL,
+                        version INTEGER NOT NULL DEFAULT 1,
+                        executionCount INTEGER NOT NULL DEFAULT 0,
+                        verifiedSuccessCount INTEGER NOT NULL DEFAULT 0,
+                        failureCount INTEGER NOT NULL DEFAULT 0,
+                        avgExecTimeMs INTEGER NOT NULL DEFAULT 0,
+                        lastFailureReason TEXT NOT NULL DEFAULT '',
+                        needsReview INTEGER NOT NULL DEFAULT 0,
+                        healthScore INTEGER NOT NULL DEFAULT 100
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_skill_evidence_needsReview ON skill_evidence(needsReview)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_skill_evidence_healthScore ON skill_evidence(healthScore)")
+            }
+        }
+
+        val MIGRATION_21_22 = object : androidx.room.migration.Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS knowledge_cache (
+                        cacheKey TEXT NOT NULL PRIMARY KEY,
+                        normalizedQuery TEXT NOT NULL,
+                        topicCategory TEXT NOT NULL DEFAULT 'GENERAL',
+                        answerSummaryBn TEXT NOT NULL,
+                        claimsJson TEXT NOT NULL DEFAULT '[]',
+                        citationsJson TEXT NOT NULL DEFAULT '[]',
+                        verificationStatus TEXT NOT NULL DEFAULT 'UNVERIFIED',
+                        storageState TEXT NOT NULL DEFAULT 'PENDING',
+                        sourceTier TEXT NOT NULL DEFAULT 'L4_WEB',
+                        etag TEXT NOT NULL DEFAULT '',
+                        lastModified TEXT NOT NULL DEFAULT '',
+                        contentHash TEXT NOT NULL DEFAULT '',
+                        createdAt INTEGER NOT NULL,
+                        expiresAt INTEGER NOT NULL,
+                        lastAccessedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_cache_normalizedQuery ON knowledge_cache(normalizedQuery)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_cache_expiresAt ON knowledge_cache(expiresAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_cache_storageState ON knowledge_cache(storageState)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS knowledge_telemetry (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        query TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        cacheTierReached TEXT NOT NULL,
+                        firstResponseMs INTEGER NOT NULL,
+                        totalLatencyMs INTEGER NOT NULL,
+                        bytesTransferred INTEGER NOT NULL DEFAULT 0,
+                        sourceCount INTEGER NOT NULL DEFAULT 0,
+                        verifiedClaimCount INTEGER NOT NULL DEFAULT 0,
+                        storageState TEXT NOT NULL DEFAULT 'NOT_REQUESTED',
+                        timestamp INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_telemetry_timestamp ON knowledge_telemetry(timestamp)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_knowledge_telemetry_cacheTierReached ON knowledge_telemetry(cacheTierReached)")
+            }
+        }
+
         @androidx.annotation.VisibleForTesting
         fun resetInstanceForTest() {
             synchronized(this) {
@@ -256,35 +430,36 @@ abstract class AssistantDatabase : RoomDatabase() {
                     AssistantDatabase::class.java,
                     DatabaseMigrationHelper.NEW_DB_NAME
                 )
-                .addMigrations(MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20)
+                .addMigrations(MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22)
                 .addCallback(object : RoomDatabase.Callback() {
                     override fun onCreate(db: SupportSQLiteDatabase) {
                         super.onCreate(db)
-                        CoroutineScope(Dispatchers.IO).launch {
-                            val dao = getDatabase(context).assistantDao()
-                            // Seed Owner Master Profile
-                            dao.insertProfile(
-                                JarvisProfileEntity(
-                                    id = 1,
-                                    systemName = "NAHID AI",
-                                    assistantVoice = "Bengali-Natural",
-                                    ownerName = "Masum Billah Nahid",
-                                    loginUserName = "Masum Billah Nahid",
-                                    loginPassword = ""
-                                )
-                            )
-
-                            // Seed Default Personal AI User Preferences
-                            dao.insertPreferences(
-                                listOf(
-                                    JarvisUserPreferenceEntity("preferred_language", "bn-BD", "VOICE", "ডিফল্ট কথোপকথনের ভাষা (বাংলা)"),
-                                    JarvisUserPreferenceEntity("assistant_voice", "Bengali-Natural", "VOICE", "ভয়েস সিন্থেসাইজার স্টাইল"),
-                                    JarvisUserPreferenceEntity("orb_overlay_enabled", "true", "UI", "স্ক্রিন ওএস ফ্লোটিং ওর্ব ডিসপ্লে"),
-                                    JarvisUserPreferenceEntity("wake_word_enabled", "false", "VOICE", "অফলাইন 'Jarvis' ওয়েক-ওয়ার্ড লিসেনিং"),
-                                    JarvisUserPreferenceEntity("wake_word_sensitivity", "MEDIUM", "VOICE", "শব্দ সনাক্তকরণ সংবেদনশীলতা"),
-                                    JarvisUserPreferenceEntity("haptic_feedback_enabled", "true", "GENERAL", "টাচ ও ওয়েক-ওয়ার্ড ভাইব্রেশন ফিডব্যাক"),
-                                    JarvisUserPreferenceEntity("arc_reactor_color", "#00F5D4", "UI", "নিউরাল কোর নিওন কালার থিম")
-                                )
+                        val now = System.currentTimeMillis()
+                        db.execSQL(
+                            """
+                            INSERT OR IGNORE INTO jarvis_profile (
+                                id, systemName, assistantVoice, mobileNumber, location, photoUri,
+                                ownerName, loginUserName, loginPassword, arcReactorColor, securityLevel, autoAutomationAllowed
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """.trimIndent(),
+                            arrayOf<Any?>(1, "NAHID AI", "Bengali-Natural", "", "", null, "Masum Billah Nahid", "Masum Billah Nahid", "", "#00F5D4", "HIGH", 1)
+                        )
+                        val defaultPrefs = listOf(
+                            arrayOf<Any?>("preferred_language", "bn-BD", "VOICE", "ডিফল্ট কথোপকথনের ভাষা (বাংলা)", now),
+                            arrayOf<Any?>("assistant_voice", "Bengali-Natural", "VOICE", "ভয়েস সিন্থেসাইজার স্টাইল", now),
+                            arrayOf<Any?>("orb_overlay_enabled", "true", "UI", "স্ক্রিন ওএস ফ্লোটিং ওর্ব ডিসপ্লে", now),
+                            arrayOf<Any?>("wake_word_enabled", "false", "VOICE", "অফলাইন 'Jarvis' ওয়েক-ওয়ার্ড লিসেনিং", now),
+                            arrayOf<Any?>("wake_word_sensitivity", "MEDIUM", "VOICE", "শব্দ সনাক্তকরণ সংবেদনশীলতা", now),
+                            arrayOf<Any?>("haptic_feedback_enabled", "true", "GENERAL", "টাচ ও ওয়েক-ওয়ার্ড ভাইব্রেশন ফিডব্যাক", now),
+                            arrayOf<Any?>("arc_reactor_color", "#00F5D4", "UI", "নিউরাল কোর নিওন কালার থিম", now)
+                        )
+                        defaultPrefs.forEach { bindArgs ->
+                            db.execSQL(
+                                """
+                                INSERT OR IGNORE INTO jarvis_user_preferences (key, value, category, description, updatedAt)
+                                VALUES (?, ?, ?, ?, ?)
+                                """.trimIndent(),
+                                bindArgs
                             )
                         }
                     }

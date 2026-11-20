@@ -24,7 +24,17 @@ data class AiSettingsState(
     val selectedAgentId: String = "jarvis_master",
     val authMode: String = AiSettingsRepository.AUTH_MODE_API_KEY, // "API_KEY" or "EPHEMERAL_PROXY"
     val ephemeralToken: String = "",
-    val proxyEndpoint: String = ""
+    val proxyEndpoint: String = "",
+    val braveSearchApiKey: String = "",
+    val tavilySearchApiKey: String = "",
+    val githubToken: String = "",
+    val preferredLanguage: String = AiSettingsRepository.DEFAULT_LANGUAGE,
+    val offlineTtsEnabled: Boolean = true,
+    val ttsSpeechRate: Float = 1.0f,
+    val silentMode: Boolean = false,
+    val speakingStyle: String = AiSettingsRepository.DEFAULT_SPEAKING_STYLE,
+    val knowledgeServerUrl: String = "",
+    val knowledgeServerToken: String = ""
 ) {
     val isApiKeyConfigured: Boolean
         get() = if (authMode == AiSettingsRepository.AUTH_MODE_EPHEMERAL_PROXY) {
@@ -32,6 +42,9 @@ data class AiSettingsState(
         } else {
             apiKey.isNotBlank() && apiKey != "MY_GEMINI_API_KEY" && !apiKey.contains("YOUR_GEMINI")
         }
+
+    val isWebSearchKeyConfigured: Boolean
+        get() = braveSearchApiKey.isNotBlank() || tavilySearchApiKey.isNotBlank()
 
     val volumeGain: Float
         get() = if (voiceVolumeLevel == "LOUD") 1.15f else 1.0f
@@ -71,6 +84,10 @@ class AiSettingsRepository(context: Context) {
     companion object {
         const val KEY_ALIAS_API_KEY = "nahid_ai_gemini_api_key"
         const val KEY_ALIAS_EPHEMERAL_TOKEN = "nahid_ai_ephemeral_token"
+        const val KEY_ALIAS_BRAVE_SEARCH = "nahid_ai_brave_search_key"
+        const val KEY_ALIAS_TAVILY_SEARCH = "nahid_ai_tavily_search_key"
+        const val KEY_ALIAS_GITHUB_PAT = "nahid_ai_github_pat"
+        const val KEY_ALIAS_KNOWLEDGE_TOKEN = "nahid_ai_knowledge_server_token"
 
         const val AUTH_MODE_API_KEY = "API_KEY"
         const val AUTH_MODE_EPHEMERAL_PROXY = "EPHEMERAL_PROXY"
@@ -79,7 +96,20 @@ class AiSettingsRepository(context: Context) {
         const val FALLBACK_LIVE_MODEL = "gemini-3.1-flash-live-preview"
         const val DEFAULT_VOICE = "Aoede"
         const val DEFAULT_API_KEY = ""
-        val AVAILABLE_VOICES = listOf("Aoede", "Puck", "Charon", "Kore", "Fenrir")
+        const val DEFAULT_LANGUAGE = "bn"
+        const val DEFAULT_SPEAKING_STYLE = "NATURAL"
+        val AVAILABLE_LANGUAGES = listOf("bn", "en", "mixed")
+        val AVAILABLE_SPEAKING_STYLES = listOf("NATURAL", "SOFT", "SWEET", "PROFESSIONAL")
+        val AVAILABLE_VOICES = listOf("Aoede", "Leda", "Kore", "Zephyr", "Puck", "Charon", "Fenrir")
+        val VOICE_DESCRIPTIONS_BN = mapOf(
+            "Aoede" to "কোমল ও উষ্ণ (নারী)",
+            "Leda" to "মিষ্টি ও প্রাণবন্ত (নারী)",
+            "Kore" to "স্পষ্ট ও দৃঢ় (নারী)",
+            "Zephyr" to "উজ্জ্বল ও মসৃণ (নারী)",
+            "Puck" to "চটপটে (পুরুষ)",
+            "Charon" to "গভীর (পুরুষ)",
+            "Fenrir" to "উচ্চশক্তি (পুরুষ)"
+        )
         val AVAILABLE_MODELS = listOf(
             DEFAULT_MODEL,
             FALLBACK_LIVE_MODEL
@@ -160,6 +190,27 @@ class AiSettingsRepository(context: Context) {
             ?: AUTH_MODE_API_KEY
         val ephemeralToken = readEncryptedSecret("gemini_ephemeral_token", KEY_ALIAS_EPHEMERAL_TOKEN)
         val proxyEndpoint = prefs.getString("gemini_proxy_endpoint", "") ?: ""
+        val braveSearchKey = readEncryptedSecret("brave_search_api_key", KEY_ALIAS_BRAVE_SEARCH)
+        val tavilySearchKey = readEncryptedSecret("tavily_search_api_key", KEY_ALIAS_TAVILY_SEARCH)
+        val githubPat = readEncryptedSecret("github_pat_token", KEY_ALIAS_GITHUB_PAT)
+        val preferredLanguage = prefs.getString("gemini_preferred_language", DEFAULT_LANGUAGE)
+            ?.takeIf { it in AVAILABLE_LANGUAGES }
+            ?: DEFAULT_LANGUAGE
+        val offlineTtsEnabled = prefs.getBoolean("jarvis_offline_tts_enabled", true)
+        val ttsSpeechRate = prefs.getFloat("jarvis_tts_speech_rate", 1.0f).coerceIn(0.6f, 1.8f)
+        val silentMode = prefs.getBoolean("jarvis_voice_silent_mode", false)
+        val speakingStyle = prefs.getString("gemini_speaking_style", DEFAULT_SPEAKING_STYLE)
+            ?.takeIf { it in AVAILABLE_SPEAKING_STYLES }
+            ?: DEFAULT_SPEAKING_STYLE
+        val knowledgeServerUrl = prefs.getString("knowledge_server_url", "") ?: ""
+        val knowledgeServerToken = readEncryptedSecret("knowledge_server_token", KEY_ALIAS_KNOWLEDGE_TOKEN)
+
+        com.example.util.JarvisVoiceSpeaker.configureVoiceSettings(
+            offlineEnabled = offlineTtsEnabled,
+            speechRate = ttsSpeechRate,
+            silentMode = silentMode,
+            preferredLanguage = preferredLanguage
+        )
 
         return AiSettingsState(
             apiKey = key,
@@ -171,7 +222,17 @@ class AiSettingsRepository(context: Context) {
             selectedAgentId = savedAgentId,
             authMode = authMode,
             ephemeralToken = ephemeralToken,
-            proxyEndpoint = proxyEndpoint
+            proxyEndpoint = proxyEndpoint,
+            braveSearchApiKey = braveSearchKey,
+            tavilySearchApiKey = tavilySearchKey,
+            githubToken = githubPat,
+            preferredLanguage = preferredLanguage,
+            offlineTtsEnabled = offlineTtsEnabled,
+            ttsSpeechRate = ttsSpeechRate,
+            silentMode = silentMode,
+            speakingStyle = speakingStyle,
+            knowledgeServerUrl = knowledgeServerUrl,
+            knowledgeServerToken = knowledgeServerToken
         )
     }
 
@@ -194,7 +255,17 @@ class AiSettingsRepository(context: Context) {
         voiceVolumeLevel: String = "NORMAL",
         authMode: String = _settingsState.value.authMode,
         ephemeralToken: String = _settingsState.value.ephemeralToken,
-        proxyEndpoint: String = _settingsState.value.proxyEndpoint
+        proxyEndpoint: String = _settingsState.value.proxyEndpoint,
+        braveSearchApiKey: String = _settingsState.value.braveSearchApiKey,
+        tavilySearchApiKey: String = _settingsState.value.tavilySearchApiKey,
+        githubToken: String = _settingsState.value.githubToken,
+        preferredLanguage: String = _settingsState.value.preferredLanguage,
+        offlineTtsEnabled: Boolean = _settingsState.value.offlineTtsEnabled,
+        ttsSpeechRate: Float = _settingsState.value.ttsSpeechRate,
+        silentMode: Boolean = _settingsState.value.silentMode,
+        speakingStyle: String = _settingsState.value.speakingStyle,
+        knowledgeServerUrl: String = _settingsState.value.knowledgeServerUrl,
+        knowledgeServerToken: String = _settingsState.value.knowledgeServerToken
     ) {
         val trimmedKey = apiKey.trim()
         val chosenModel = modelName.trim().takeIf { AVAILABLE_MODELS.contains(it) } ?: DEFAULT_MODEL
@@ -203,9 +274,16 @@ class AiSettingsRepository(context: Context) {
         } else {
             AUTH_MODE_API_KEY
         }
+        val normalizedLang = preferredLanguage.trim().takeIf { it in AVAILABLE_LANGUAGES } ?: DEFAULT_LANGUAGE
+        val normalizedRate = ttsSpeechRate.coerceIn(0.6f, 1.8f)
+        val normalizedStyle = speakingStyle.trim().takeIf { it in AVAILABLE_SPEAKING_STYLES } ?: DEFAULT_SPEAKING_STYLE
 
         writeEncryptedSecret("gemini_api_key", KEY_ALIAS_API_KEY, trimmedKey)
         writeEncryptedSecret("gemini_ephemeral_token", KEY_ALIAS_EPHEMERAL_TOKEN, ephemeralToken)
+        writeEncryptedSecret("brave_search_api_key", KEY_ALIAS_BRAVE_SEARCH, braveSearchApiKey)
+        writeEncryptedSecret("tavily_search_api_key", KEY_ALIAS_TAVILY_SEARCH, tavilySearchApiKey)
+        writeEncryptedSecret("github_pat_token", KEY_ALIAS_GITHUB_PAT, githubToken)
+        writeEncryptedSecret("knowledge_server_token", KEY_ALIAS_KNOWLEDGE_TOKEN, knowledgeServerToken)
 
         prefs.edit()
             .putString("gemini_model_name", chosenModel)
@@ -215,10 +293,22 @@ class AiSettingsRepository(context: Context) {
             .putString("gemini_volume_level", voiceVolumeLevel)
             .putString("gemini_auth_mode", normalizedAuthMode)
             .putString("gemini_proxy_endpoint", proxyEndpoint.trim())
+            .putString("gemini_preferred_language", normalizedLang)
+            .putBoolean("jarvis_offline_tts_enabled", offlineTtsEnabled)
+            .putFloat("jarvis_tts_speech_rate", normalizedRate)
+            .putBoolean("jarvis_voice_silent_mode", silentMode)
+            .putString("gemini_speaking_style", normalizedStyle)
+            .putString("knowledge_server_url", knowledgeServerUrl.trim())
             .apply()
 
         _settingsState.value = loadSettings()
     }
+
+    fun getGitHubToken(): String = _settingsState.value.githubToken
+    fun getBraveSearchApiKey(): String = _settingsState.value.braveSearchApiKey
+    fun getTavilySearchApiKey(): String = _settingsState.value.tavilySearchApiKey
+    fun getKnowledgeServerUrl(): String = _settingsState.value.knowledgeServerUrl
+    fun getKnowledgeServerToken(): String = _settingsState.value.knowledgeServerToken
 
     fun updateSystemInstruction(instruction: String) {
         val curr = _settingsState.value
@@ -231,7 +321,12 @@ class AiSettingsRepository(context: Context) {
             voiceVolumeLevel = curr.voiceVolumeLevel,
             authMode = curr.authMode,
             ephemeralToken = curr.ephemeralToken,
-            proxyEndpoint = curr.proxyEndpoint
+            proxyEndpoint = curr.proxyEndpoint,
+            preferredLanguage = curr.preferredLanguage,
+            offlineTtsEnabled = curr.offlineTtsEnabled,
+            ttsSpeechRate = curr.ttsSpeechRate,
+            silentMode = curr.silentMode,
+            speakingStyle = curr.speakingStyle
         )
     }
 

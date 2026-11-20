@@ -21,6 +21,10 @@ class JarvisSkillRepository(
         skillDao.getSkillByIdSync(skillId)
     }
 
+    suspend fun getSkillSnapshotList(): List<JarvisSkillEntity> = withContext(Dispatchers.IO) {
+        skillDao.getAllSkillsSync()
+    }
+
     fun getSkillFlow(skillId: String): Flow<JarvisSkillEntity?> {
         return skillDao.getSkillById(skillId)
     }
@@ -161,6 +165,65 @@ class JarvisSkillRepository(
         } else {
             skillDao.recordSkillFailure(skillId)
         }
+    }
+
+    /**
+     * Analyzes repeated runtime failures in stored skills and proposes a bounded,
+     * rollback-capable versioned playbook stabilization (e.g., increasing UI settle delay
+     * after OPEN_APP or inserting WAIT_FOR_ELEMENT before fragile clicks).
+     * Never modifies source code or binary artifacts; strictly operates on Room playbooks.
+     */
+    suspend fun analyzeFailureHistoryAndProposeRevision(
+        skillId: String,
+        failureReason: String = "ELEMENT_TIMEOUT"
+    ): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val existing = skillDao.getSkillByIdSync(skillId)
+            ?: return@withContext Pair(false, "স্কিল খুঁজে পাওয়া যায়নি।")
+
+        if (existing.failureCount < 2) {
+            return@withContext Pair(false, "'${existing.nameBengali}' এখনও স্বয়ংক্রিয় সংশোধনের সীমায় (২+ ব্যর্থতা) পৌঁছায়নি।")
+        }
+
+        val currentSteps = skillDao.getStepsForSkillSync(skillId)
+        if (currentSteps.isEmpty()) {
+            return@withContext Pair(false, "সংশোধনের জন্য কোনো সক্রিয় ধাপ নেই।")
+        }
+
+        val revisedSteps = mutableListOf<JarvisSkillStepEntity>()
+        for (step in currentSteps) {
+            val stabilizedDelay = when (step.actionType) {
+                "OPEN_APP" -> (step.delayAfterMs + 600L).coerceAtMost(2500L)
+                "CLICK" -> (step.delayAfterMs + 300L).coerceAtMost(1800L)
+                else -> step.delayAfterMs
+            }
+            if (step.actionType == "CLICK" && !step.targetText.isNullOrBlank() &&
+                revisedSteps.none { it.actionType == "WAIT_FOR_ELEMENT" && it.targetText == step.targetText }
+            ) {
+                revisedSteps.add(
+                    JarvisSkillStepEntity(
+                        skillId = skillId,
+                        stepIndex = revisedSteps.size + 1,
+                        actionType = "WAIT_FOR_ELEMENT",
+                        targetText = step.targetText,
+                        targetViewId = step.targetViewId,
+                        descriptionBengali = "‘${step.targetText}’ উপাদান দৃশ্যমান হওয়া পর্যন্ত অপেক্ষা",
+                        delayAfterMs = 700L
+                    )
+                )
+            }
+            revisedSteps.add(step.copy(id = 0, skillId = skillId, delayAfterMs = stabilizedDelay))
+        }
+
+        val validation = com.example.automation.JarvisSkillRecorder.validateSkillPlaybook(revisedSteps)
+        if (!validation.isValid) {
+            return@withContext Pair(false, "সংশোধিত প্লেবুক ভ্যালিডেশন পাস করেনি: ${validation.issues.joinToString("; ")}")
+        }
+
+        updateSkillWithVersioning(
+            skillId = skillId,
+            newDescription = "${existing.description} [স্বয়ংক্রিয় স্থিতিশীল সংশোধন v${existing.version + 1}: $failureReason]",
+            newSteps = revisedSteps
+        )
     }
 
     /**

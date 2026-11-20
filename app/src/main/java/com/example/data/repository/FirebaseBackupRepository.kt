@@ -2,6 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import com.example.data.local.*
+import com.example.security.SecureKeystoreVault
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -18,25 +19,42 @@ data class CloudBackupInfo(
     val noteCount: Int,
     val chatCount: Int,
     val systemName: String,
-    val backupLocationLabel: String = "লোকাল এনক্রিপ্টেড-রেডি ভল্ট (ফায়ারবেস সংযোগ বিচ্ছিন্ন)"
+    val backupLocationLabel: String = "লোকাল এনক্রিপ্টেড ভল্ট (AES-256-GCM)"
 )
 
 /**
  * Local Personal AI Vault Backup Repository.
  * Note: All legacy Pharmacy Firebase RTDB endpoints have been permanently removed.
- * Data is backed up locally into app-private storage (nahid_ai_vault/nahid_ai_backup.json)
- * and verified on read-back.
+ * Data is encrypted via Android Keystore AES-256-GCM (SecureKeystoreVault) and stored
+ * inside app-private storage (nahid_ai_vault/nahid_ai_backup.json) with read-back verification.
  */
 class FirebaseBackupRepository(
     private val dao: AssistantDao,
     private val context: Context
 ) {
+    companion object {
+        private const val VAULT_KEY_ALIAS = "nahid_ai_vault_backup_key"
+    }
+
     private val vaultFile: File
         get() {
             val dir = File(context.filesDir, "nahid_ai_vault")
             if (!dir.exists()) dir.mkdirs()
             return File(dir, "nahid_ai_backup.json")
         }
+
+    private fun readDecryptedVaultJson(): JSONObject {
+        val raw = vaultFile.readText(Charsets.UTF_8).trim()
+        val plaintext = if (raw.startsWith("{")) {
+            raw
+        } else {
+            SecureKeystoreVault.decryptString(context, VAULT_KEY_ALIAS, raw)
+        }
+        if (plaintext.isBlank()) {
+            throw IllegalStateException("ভল্ট ব্যাকআপ ডিক্রিপ্ট করা যায়নি।")
+        }
+        return JSONObject(plaintext)
+    }
 
     suspend fun checkCloudBackupInfo(): Result<CloudBackupInfo> = withContext(Dispatchers.IO) {
         try {
@@ -54,7 +72,7 @@ class FirebaseBackupRepository(
                 )
             }
 
-            val json = JSONObject(vaultFile.readText(Charsets.UTF_8))
+            val json = readDecryptedVaultJson()
             val meta = json.optJSONObject("metadata")
             val lastUpdated = meta?.optLong("lastUpdated", 0L) ?: vaultFile.lastModified()
             val formattedDate = if (lastUpdated > 0L) {
@@ -161,16 +179,20 @@ class FirebaseBackupRepository(
             }
             rootJson.put("chats", chatsArray)
 
-            progressCallback("লোকাল নিরাপদ ভল্টে সংরক্ষণ করা হচ্ছে...")
-            vaultFile.writeText(rootJson.toString(2), Charsets.UTF_8)
+            progressCallback("Android Keystore AES-256-GCM এনক্রিপ্ট করে ভল্টে সংরক্ষণ করা হচ্ছে...")
+            val encryptedPayload = SecureKeystoreVault.encryptString(context, VAULT_KEY_ALIAS, rootJson.toString())
+            if (encryptedPayload.isBlank()) {
+                return@withContext Result.failure(Exception("ভল্ট এনক্রিপশন সম্পন্ন করা যায়নি।"))
+            }
+            vaultFile.writeText(encryptedPayload, Charsets.UTF_8)
 
-            // Verify written JSON cleanly
-            val verified = JSONObject(vaultFile.readText(Charsets.UTF_8))
+            // Verify written encrypted vault cleanly on read-back
+            val verified = readDecryptedVaultJson()
             val countTotal = (verified.optJSONArray("memories")?.length() ?: 0) +
                 (verified.optJSONArray("tasks")?.length() ?: 0) +
                 (verified.optJSONArray("notes")?.length() ?: 0)
 
-            Result.success("লোকাল ভল্টে ব্যাকআপ সম্পন্ন এবং যাচাইকৃত ($countTotal আইটেম)।")
+            Result.success("এনক্রিপ্টেড লোকাল ভল্টে ব্যাকআপ সম্পন্ন ও যাচাইকৃত ($countTotal আইটেম)।")
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -178,12 +200,12 @@ class FirebaseBackupRepository(
 
     suspend fun restoreFromCloud(progressCallback: (String) -> Unit): Result<String> = withContext(Dispatchers.IO) {
         try {
-            progressCallback("লোকাল ভল্ট থেকে ব্যাকআপ পড়া হচ্ছে...")
+            progressCallback("এনক্রিপ্টেড লোকাল ভল্ট থেকে ব্যাকআপ পড়া হচ্ছে...")
             if (!vaultFile.exists() || vaultFile.length() == 0L) {
                 return@withContext Result.failure(Exception("লোকাল ভল্টে কোনো ব্যাকআপ ফাইল পাওয়া যায়নি।"))
             }
 
-            val rootJson = JSONObject(vaultFile.readText(Charsets.UTF_8))
+            val rootJson = readDecryptedVaultJson()
 
             val existingMemKeys = dao.getAllActiveMemoriesSync().map { it.key.lowercase() }.toSet()
             val memoriesArray = rootJson.optJSONArray("memories")

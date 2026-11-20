@@ -76,6 +76,28 @@ fun JarvisOsSettingsDialog(
     var isFloatingBubbleRunning: Boolean by remember {
         mutableStateOf(JarvisFloatingOverlayService.isRunning)
     }
+    var isNotificationListenerActive: Boolean by remember {
+        mutableStateOf(com.example.permissions.PermissionRegistry.isGranted(context, "notification_listener"))
+    }
+    var assistantRoleStatus by remember {
+        mutableStateOf(com.example.service.JarvisAssistantRoleManager.getStatus(context))
+    }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                isAccessibilityActive = JarvisDeviceAutomationHelper.isAccessibilityGranted(context)
+                isOverlayActive = JarvisDeviceAutomationHelper.isOverlayGranted(context)
+                isBatteryIgnored = JarvisDeviceAutomationHelper.isBatteryOptimizationIgnored(context)
+                isFloatingBubbleRunning = JarvisFloatingOverlayService.isRunning
+                isNotificationListenerActive = com.example.permissions.PermissionRegistry.isGranted(context, "notification_listener")
+                assistantRoleStatus = com.example.service.JarvisAssistantRoleManager.getStatus(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -246,6 +268,43 @@ fun JarvisOsSettingsDialog(
                         actionButtonText = "ব্যাটারি অপ্টিমাইজেশন ছাড় দিন",
                         onAction = {
                             JarvisDeviceAutomationHelper.openBatteryOptimizationSettings(context)
+                        }
+                    )
+
+                    // PERMISSION 3B: NOTIFICATION LISTENER SERVICE
+                    PermissionStatusCard(
+                        title = "৩ক. নোটিফিকেশন ইন্টেলিজেন্স (Notification Listener)",
+                        description = "ইনকামিং কল, মেসেজ ও জরুরি নোটিফিকেশন পড়ে শোনানো এবং সামারি তৈরির জন্য এই অনুমতি প্রয়োজন।",
+                        isGranted = isNotificationListenerActive,
+                        grantedText = "নোটিফিকেশন লিসেনার সক্রিয়",
+                        notGrantedText = "নোটিফিকেশন অনুমতি প্রয়োজন",
+                        actionButtonText = "নোটিফিকেশন অ্যাক্সেস চালু করুন",
+                        onAction = {
+                            try {
+                                val i = android.content.Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+                                    flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                }
+                                context.startActivity(i)
+                            } catch (_: Exception) {
+                            }
+                        }
+                    )
+
+                    // PERMISSION 3C: DEFAULT SYSTEM ASSISTANT ROLE
+                    PermissionStatusCard(
+                        title = "৩খ. ডিফল্ট অ্যান্ড্রয়েড অ্যাসিস্ট্যান্ট রোল",
+                        description = "পাওয়ার বাটন বা সিস্টেম অ্যাসিস্ট জেসচার থেকে সরাসরি NAHID AI চালু করার জন্য ডিফল্ট ডিজিটাল অ্যাসিস্ট্যান্ট হিসেবে সেট করুন।",
+                        isGranted = assistantRoleStatus.isDefaultAssistant,
+                        grantedText = "ডিফল্ট অ্যাসিস্ট্যান্ট সক্রিয়",
+                        notGrantedText = "ডিফল্ট অ্যাসিস্ট্যান্ট সেট করা নেই",
+                        actionButtonText = "ডিফল্ট অ্যাসিস্ট্যান্ট নির্বাচন করুন",
+                        onAction = {
+                            try {
+                                context.startActivity(
+                                    com.example.service.JarvisAssistantRoleManager.createSelectAssistantIntent(context)
+                                )
+                            } catch (_: Exception) {
+                            }
                         }
                     )
 

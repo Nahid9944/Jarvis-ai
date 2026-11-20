@@ -113,8 +113,9 @@ class GeminiLiveSessionManager(
             val part = JSONObject()
             var fullInstruction = settings.systemInstruction.ifBlank { AiSettingsRepository.DEFAULT_SYSTEM_INSTRUCTION }
             try {
+                fullInstruction += "\n\n[Central Master Authority]: ${AiAgentRegistry.JARVIS_MASTER.name} remains the Central Controller (Master Brain) across all turns; any active specialist agent operates strictly under Master risk, confirmation, and factual-truth governance."
                 val activeAgent = AiAgentRegistry.getAgentById(settings.selectedAgentId)
-                if (activeAgent.systemPromptExtension.isNotBlank()) {
+                if (activeAgent.systemPromptExtension.isNotBlank() && !activeAgent.isController) {
                     fullInstruction += "\n\n[Active Specialized Agent Persona: ${activeAgent.name} (${activeAgent.titleBengali})]:\nRole: ${activeAgent.roleBengali}\nDirectives: ${activeAgent.systemPromptExtension}"
                 }
                 if (memoryContext.isNotBlank()) {
@@ -122,6 +123,18 @@ class GeminiLiveSessionManager(
                 }
             } catch (_: Exception) {
             }
+            val langPolicy = when (settings.preferredLanguage) {
+                "en" -> "\n\n[Preferred Language Policy]: Respond clearly in natural English unless the user explicitly speaks Bengali."
+                "mixed" -> "\n\n[Preferred Language Policy]: Respond naturally in conversational Bengali, Banglish, or English matching the user's input language."
+                else -> "\n\n[Preferred Language Policy]: Respond primarily in natural, clear Bengali (বাংলা), smoothly understanding Banglish and English commands."
+            }
+            val stylePolicy = when (settings.speakingStyle) {
+                "SOFT" -> "\n\n[Speaking Style]: Speak in a calm, soft, gentle, reassuring feminine tone with clear Bengali pronunciation."
+                "SWEET" -> "\n\n[Speaking Style]: Speak warmly and pleasantly like a kind, attentive personal assistant with sweet, natural Bengali intonation."
+                "PROFESSIONAL" -> "\n\n[Speaking Style]: Speak crisply, concisely, and professionally while remaining polite and clear."
+                else -> "\n\n[Speaking Style]: Speak naturally, warmly, and clearly in everyday conversational tone."
+            }
+            fullInstruction += langPolicy + stylePolicy
             fullInstruction = LiveConversationContextBridge.generateFullCompanionSystemPrompt(fullInstruction)
             part.put("text", fullInstruction)
             parts.put(part)
@@ -213,7 +226,8 @@ class GeminiLiveSessionManager(
             prev.apiKey != newSettings.apiKey ||
             prev.ephemeralToken != newSettings.ephemeralToken ||
             prev.proxyEndpoint != newSettings.proxyEndpoint ||
-            prev.systemInstruction != newSettings.systemInstruction
+            prev.systemInstruction != newSettings.systemInstruction ||
+            prev.preferredLanguage != newSettings.preferredLanguage
 
         if (structuralChange) {
             stopSession()
@@ -294,6 +308,30 @@ class GeminiLiveSessionManager(
 
         PlaybackInterruptionBridge.registerSessionManager(this)
         JarvisCameraVisionCoordinator.registerSessionManager(this)
+        LiveConversationContextBridge.setFlushListener { packets ->
+            val ws = webSocket ?: return@setFlushListener
+            if (!isSessionActive.get() || !isSetupReady.get()) {
+                throw IllegalStateException("Live WebSocket not ready")
+            }
+            val joined = packets.joinToString("\n") { "- [${it.dedupKey}] ${it.content}" }
+            val turns = JSONArray().apply {
+                put(JSONObject().apply {
+                    put("role", "user")
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("text", "[LIVE CONTEXT UPDATE]:\n$joined")
+                        })
+                    })
+                })
+            }
+            val payload = JSONObject().apply {
+                put("clientContent", JSONObject().apply {
+                    put("turns", turns)
+                    put("turnComplete", false)
+                })
+            }
+            ws.send(payload.toString())
+        }
 
         audioPlayer = AudioOutputPlayer(
             onPlaybackLevel = { level ->
@@ -420,20 +458,66 @@ class GeminiLiveSessionManager(
     }
 
     private fun sendSetupMessage(ws: WebSocket, settings: AiSettingsState) {
-        try {
-            val memoryContext = try {
-                runBlocking { toolExecutor.getTopMemoriesForContext() }
-            } catch (_: Exception) {
-                ""
+        scope.launch(Dispatchers.IO) {
+            try {
+                val memoryContext = try {
+                    toolExecutor.getEnrichedContextForSession(settings.systemInstruction)
+                } catch (_: Exception) {
+                    try {
+                        toolExecutor.getTopMemoriesForContext()
+                    } catch (_: Exception) {
+                        ""
+                    }
+                }
+                val setupObj = buildSetupJson(
+                    settings = settings,
+                    toolDeclarations = toolExecutor.getToolDeclarations(),
+                    memoryContext = memoryContext
+                )
+                ws.send(setupObj.toString())
+            } catch (e: Exception) {
+                updateState(LiveSessionState.ERROR, "সেটআপ তৈরিতে ত্রুটি: ${e.localizedMessage}")
             }
-            val setupObj = buildSetupJson(
-                settings = settings,
-                toolDeclarations = toolExecutor.getToolDeclarations(),
-                memoryContext = memoryContext
+        }
+    }
+
+    /**
+     * Streams progressive knowledge stages (Stage 1: Fast Cached/Summary -> Stage 2: Deep Verified Update)
+     * into an active Gemini Live session without blocking or cancelling the user's microphone turn.
+     */
+    fun sendProgressiveKnowledgeUpdate(stageLabel: String, summaryText: String, requestVoiceSpeech: Boolean = false) {
+        val cleanSummary = summaryText.trim()
+        if (cleanSummary.isBlank()) return
+        val ws = webSocket
+        if (!isSessionActive.get() || !isSetupReady.get() || ws == null) {
+            LiveConversationContextBridge.enqueueContextUpdate(
+                dedupKey = "knowledge_$stageLabel",
+                content = cleanSummary
             )
-            ws.send(setupObj.toString())
-        } catch (e: Exception) {
-            updateState(LiveSessionState.ERROR, "সেটআপ তৈরিতে ত্রুটি: ${e.localizedMessage}")
+            return
+        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                val turns = JSONArray().apply {
+                    put(JSONObject().apply {
+                        put("role", "user")
+                        put("parts", JSONArray().apply {
+                            put(JSONObject().apply {
+                                put("text", "[PROGRESSIVE KNOWLEDGE UPDATE - $stageLabel]: $cleanSummary")
+                            })
+                        })
+                    })
+                }
+                val payload = JSONObject().apply {
+                    put("clientContent", JSONObject().apply {
+                        put("turns", turns)
+                        put("turnComplete", requestVoiceSpeech)
+                    })
+                }
+                ws.send(payload.toString())
+            } catch (_: Exception) {
+                LiveConversationContextBridge.enqueueContextUpdate("knowledge_$stageLabel", cleanSummary)
+            }
         }
     }
 
@@ -702,6 +786,13 @@ class GeminiLiveSessionManager(
         }
     }
 
+    fun stopMicStreaming() {
+        audioStreamer?.stop()
+        if (_currentState.value == LiveSessionState.LISTENING) {
+            updateState(LiveSessionState.CONNECTED, "মাইক্রোফোন বিরতিতে আছে")
+        }
+    }
+
     fun sendUserTextMessage(text: String, settings: AiSettingsState? = null) {
         val query = text.trim()
         if (query.isBlank()) return
@@ -764,6 +855,7 @@ class GeminiLiveSessionManager(
         isSessionActive.set(false)
         isSetupReady.set(false)
         PlaybackInterruptionBridge.unregisterSessionManager()
+        LiveConversationContextBridge.setFlushListener(null)
         try {
             webSocket?.close(1000, "User stopped session")
         } catch (_: Exception) {

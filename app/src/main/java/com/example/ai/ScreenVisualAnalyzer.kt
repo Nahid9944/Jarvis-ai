@@ -21,7 +21,31 @@ data class ScreenActionSuggestion(
     val actionType: String, // "click", "type", "scroll", "open_app", "system"
     val title: String,
     val description: String,
-    val targetTextOrId: String? = null
+    val targetTextOrId: String? = null,
+    val viewId: String? = null,
+    val elementName: String? = null,
+    val elementType: String = "Button",
+    val clickable: Boolean = true,
+    val inputPayload: String? = null,
+    val boundsLeft: Int = 0,
+    val boundsTop: Int = 0,
+    val boundsRight: Int = 0,
+    val boundsBottom: Int = 0,
+    val centerNormX: Float? = null,
+    val centerNormY: Float? = null,
+    val confidence: Float = 0.7f,
+    val screenshotTimestamp: Long = System.currentTimeMillis(),
+    val screenshotWidth: Int = 0,
+    val screenshotHeight: Int = 0
+)
+
+data class VisionActionExecutionOutcome(
+    val success: Boolean,
+    val status: String,
+    val verified: Boolean,
+    val strategyUsed: String,
+    val screenChanged: Boolean,
+    val summaryBengali: String
 )
 
 data class ScreenVisualAnalysis(
@@ -30,7 +54,9 @@ data class ScreenVisualAnalysis(
     val screenDescription: String,
     val suggestions: List<ScreenActionSuggestion>,
     val rawAiResponse: String,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val frameWidth: Int = 0,
+    val frameHeight: Int = 0
 )
 
 data class ExpressionAndGestureResult(
@@ -79,13 +105,221 @@ object ScreenVisualAnalyzer {
                         actionType = "system",
                         title = "পারমিশন ওপেন করুন",
                         description = "অ্যাক্সেসিবিলিটি অথবা স্ক্রিন পারমিশন সেটিংস দেখুন",
-                        targetTextOrId = "accessibility"
+                        targetTextOrId = "accessibility",
+                        confidence = 1.0f
                     )
                 ),
                 rawAiResponse = "No bitmap captured"
             )
         }
         return Pair(bitmap, analysis)
+    }
+
+    /**
+     * Vision-to-Action Execution Bridge:
+     * Validates frame freshness, orientation alignment, and confidence before executing semantic-first
+     * (viewId / text) or normalized-coordinate fallback actions, then verifies UI delta.
+     */
+    suspend fun executeVisualSuggestion(
+        context: Context,
+        suggestion: ScreenActionSuggestion,
+        allowCoordinateFallback: Boolean = true,
+        maxFrameAgeMs: Long = 15_000L
+    ): VisionActionExecutionOutcome = withContext(Dispatchers.Default) {
+        val now = System.currentTimeMillis()
+        if (suggestion.screenshotTimestamp > 0L && (now - suggestion.screenshotTimestamp) > maxFrameAgeMs) {
+            return@withContext VisionActionExecutionOutcome(
+                success = false,
+                status = "STALE_FRAME",
+                verified = false,
+                strategyUsed = "NONE",
+                screenChanged = false,
+                summaryBengali = "ভিজ্যুয়াল স্ক্রিন ফ্রেমটি পুরোনো হয়ে গেছে — নিরাপদ অ্যাকশনের জন্য স্ক্রিন নতুন করে বিশ্লেষণ করুন।"
+            )
+        }
+
+        val action = suggestion.actionType.trim().lowercase(java.util.Locale.ROOT)
+        if (action == "click" && !suggestion.clickable && suggestion.viewId.isNullOrBlank() && suggestion.targetTextOrId.isNullOrBlank()) {
+            return@withContext VisionActionExecutionOutcome(
+                success = false,
+                status = "NON_CLICKABLE_ELEMENT",
+                verified = false,
+                strategyUsed = "NONE",
+                screenChanged = false,
+                summaryBengali = "নির্বাচিত উপাদানটি ক্লিকযোগ্য নয় বা এর কনফিডেন্স কম।"
+            )
+        }
+
+        val dm = context.resources.displayMetrics
+        val curW = dm.widthPixels.coerceAtLeast(1)
+        val curH = dm.heightPixels.coerceAtLeast(1)
+        if (suggestion.screenshotWidth > 0 && suggestion.screenshotHeight > 0) {
+            val frameLandscape = suggestion.screenshotWidth > suggestion.screenshotHeight
+            val deviceLandscape = curW > curH
+            if (frameLandscape != deviceLandscape) {
+                return@withContext VisionActionExecutionOutcome(
+                    success = false,
+                    status = "ORIENTATION_MISMATCH",
+                    verified = false,
+                    strategyUsed = "NONE",
+                    screenChanged = false,
+                    summaryBengali = "স্ক্রিন রোটেশন পরিবর্তিত হওয়ায় পুরোনো কোঅর্ডিনেটে ক্লিক বাতিল করা হয়েছে।"
+                )
+            }
+        }
+
+        if (action == "open_app") {
+            val appTarget = suggestion.targetTextOrId?.trim().orEmpty().ifBlank { suggestion.title }
+            val (ok, msg) = com.example.util.JarvisDeviceAutomationHelper.openApp(context, appTarget)
+            return@withContext VisionActionExecutionOutcome(
+                success = ok,
+                status = if (ok) "APP_LAUNCH_DISPATCHED" else "APP_NOT_FOUND",
+                verified = false,
+                strategyUsed = "INTENT_APP_LAUNCH",
+                screenChanged = ok,
+                summaryBengali = msg
+            )
+        }
+
+        if (action == "system") {
+            val target = suggestion.targetTextOrId?.trim().orEmpty()
+            val (ok, msg) = if (target == "accessibility" || target == "screen_capture") {
+                com.example.util.JarvisDeviceAutomationHelper.openApp(context, "settings")
+            } else {
+                com.example.util.JarvisDeviceAutomationHelper.performSystemAction(target.ifBlank { "home" })
+            }
+            return@withContext VisionActionExecutionOutcome(
+                success = ok,
+                status = if (ok) "SYSTEM_ACTION_EXECUTED" else "PERMISSION_REQUIRED",
+                verified = ok,
+                strategyUsed = "GLOBAL_ACTION",
+                screenChanged = ok,
+                summaryBengali = msg
+            )
+        }
+
+        val a11y = com.example.service.JarvisAccessibilityService.instance
+            ?: return@withContext VisionActionExecutionOutcome(
+                success = false,
+                status = "PERMISSION_REQUIRED",
+                verified = false,
+                strategyUsed = "NONE",
+                screenChanged = false,
+                summaryBengali = "ভিজ্যুয়াল অ্যাকশন সম্পাদনের জন্য Accessibility Service সক্রিয় থাকা প্রয়োজন।"
+            )
+
+        val beforeScreen = ScreenPerceptionEngine.inspectCurrentScreen(context, sanitize = true)
+        val beforeHash = ScreenPerceptionEngine.computeScreenHash(beforeScreen)
+
+        var dispatched = false
+        var strategyUsed = "NONE"
+        var detailMsg = ""
+
+        when (action) {
+            "scroll" -> {
+                val dir = if (suggestion.targetTextOrId?.contains("up", true) == true) "scroll_up" else "scroll_down"
+                val (ok, msg) = com.example.util.JarvisDeviceAutomationHelper.performSwipeAwait(dir)
+                dispatched = ok
+                strategyUsed = "SEMANTIC_SCROLL"
+                detailMsg = msg
+            }
+            "type" -> {
+                val focusTarget = suggestion.viewId?.takeIf { it.isNotBlank() } ?: suggestion.targetTextOrId?.takeIf { it.isNotBlank() }
+                if (!focusTarget.isNullOrBlank()) {
+                    if (suggestion.viewId?.isNotBlank() == true) a11y.clickElementByIdAwait(suggestion.viewId)
+                    else a11y.clickElementByTextAwait(focusTarget)
+                    kotlinx.coroutines.delay(200)
+                }
+                val textToType = suggestion.inputPayload?.ifBlank { null } ?: suggestion.targetTextOrId.orEmpty()
+                val (ok, msg) = com.example.util.JarvisDeviceAutomationHelper.typeTextOnScreen(textToType)
+                dispatched = ok
+                strategyUsed = "ACCESSIBILITY_INPUT"
+                detailMsg = msg
+            }
+            else -> {
+                // 1. Semantic ViewId lookup first
+                val viewId = suggestion.viewId?.trim().orEmpty()
+                if (viewId.isNotBlank() && a11y.clickElementByIdAwait(viewId)) {
+                    dispatched = true
+                    strategyUsed = "SEMANTIC_VIEW_ID"
+                    detailMsg = "'$viewId' উপাদানে ক্লিক করা হয়েছে।"
+                }
+                // 2. Semantic Text / ContentDescription lookup (targetTextOrId then elementName)
+                val textTarget = suggestion.targetTextOrId?.trim().orEmpty()
+                if (!dispatched && textTarget.isNotBlank() && a11y.clickElementByTextAwait(textTarget)) {
+                    dispatched = true
+                    strategyUsed = "SEMANTIC_TEXT"
+                    detailMsg = "'$textTarget' উপাদানে ক্লিক করা হয়েছে।"
+                }
+                val elemName = suggestion.elementName?.trim().orEmpty()
+                if (!dispatched && elemName.isNotBlank() && elemName != textTarget && a11y.clickElementByTextAwait(elemName)) {
+                    dispatched = true
+                    strategyUsed = "SEMANTIC_ELEMENT_NAME"
+                    detailMsg = "'$elemName' উপাদানে ক্লিক করা হয়েছে।"
+                }
+                // 3. Scaled normalized coordinate fallback if confidence is acceptable
+                if (!dispatched && allowCoordinateFallback) {
+                    val normX = suggestion.centerNormX ?: computeNormalizedX(suggestion)
+                    val normY = suggestion.centerNormY ?: computeNormalizedY(suggestion)
+                    if (normX != null && normY != null && suggestion.confidence >= 0.45f) {
+                        val pxX = (normX.coerceIn(0f, 1f) * curW).coerceIn(1f, (curW - 1).toFloat())
+                        val pxY = (normY.coerceIn(0f, 1f) * curH).coerceIn(1f, (curH - 1).toFloat())
+                        dispatched = a11y.clickCoordinatesAwait(pxX, pxY)
+                        if (dispatched) {
+                            strategyUsed = "SCALED_COORDINATE_FALLBACK"
+                            detailMsg = "দৃশ্যমান অবস্থানে (${String.format(java.util.Locale.US, "%.2f", normX)}, ${String.format(java.util.Locale.US, "%.2f", normY)}) ক্লিক করা হয়েছে।"
+                        } else {
+                            detailMsg = "সমন্বয়কৃত অবস্থানে জেসচার ক্লিক ব্যর্থ হয়েছে।"
+                        }
+                    } else {
+                        detailMsg = if (suggestion.confidence < 0.45f) {
+                            "ভিজ্যুয়াল লক্ষ্য '${suggestion.title}'-এর কনফিডেন্স (${(suggestion.confidence * 100).toInt()}%) কম হওয়ায় নিরাপদ ক্লিক স্থগিত।"
+                        } else {
+                            "স্ক্রিনে '${suggestion.targetTextOrId ?: suggestion.title}' উপাদানের অবস্থান নিশ্চিত করা যায়নি।"
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!dispatched) {
+            return@withContext VisionActionExecutionOutcome(
+                success = false,
+                status = "TARGET_NOT_ACTED",
+                verified = false,
+                strategyUsed = strategyUsed,
+                screenChanged = false,
+                summaryBengali = detailMsg.ifBlank { "ভিজ্যুয়াল অ্যাকশন সম্পাদন করা যায়নি।" }
+            )
+        }
+
+        kotlinx.coroutines.delay(350)
+        val afterScreen = ScreenPerceptionEngine.inspectCurrentScreen(context, sanitize = true)
+        val afterHash = ScreenPerceptionEngine.computeScreenHash(afterScreen)
+        val changed = beforeHash != afterHash || beforeScreen.foregroundPackage != afterScreen.foregroundPackage
+
+        VisionActionExecutionOutcome(
+            success = true,
+            status = if (changed) "VERIFIED_UI_CHANGED" else "DISPATCHED_NO_HASH_DELTA",
+            verified = changed,
+            strategyUsed = strategyUsed,
+            screenChanged = changed,
+            summaryBengali = if (changed) {
+                "$detailMsg (স্ক্রিনের অবস্থা পরিবর্তন যাচাইকৃত)"
+            } else {
+                "$detailMsg (ক্লিক পাঠানো হয়েছে, স্ক্রিন পরিবর্তন পরবর্তী ধাপে যাচাইযোগ্য)"
+            }
+        )
+    }
+
+    private fun computeNormalizedX(s: ScreenActionSuggestion): Float? {
+        if (s.screenshotWidth <= 0 || s.boundsRight <= s.boundsLeft) return null
+        return ((s.boundsLeft + s.boundsRight) / 2f) / s.screenshotWidth.toFloat()
+    }
+
+    private fun computeNormalizedY(s: ScreenActionSuggestion): Float? {
+        if (s.screenshotHeight <= 0 || s.boundsBottom <= s.boundsTop) return null
+        return ((s.boundsTop + s.boundsBottom) / 2f) / s.screenshotHeight.toFloat()
     }
 
     suspend fun analyzeBitmap(
@@ -100,7 +334,9 @@ object ScreenVisualAnalyzer {
                 detectedApp = "অজানা",
                 screenDescription = "API key missing.",
                 suggestions = emptyList(),
-                rawAiResponse = "API key not configured"
+                rawAiResponse = "API key not configured",
+                frameWidth = bitmap.width,
+                frameHeight = bitmap.height
             )
         }
 
@@ -123,7 +359,7 @@ object ScreenVisualAnalyzer {
 
             val promptText = buildString {
                 append("You are J.A.R.V.I.S., the ultimate Iron Man AI operating system assistant on Android. ")
-                append("Carefully inspect this mobile phone screenshot. ")
+                append("Carefully inspect this mobile phone screenshot (${bitmap.width}x${bitmap.height}). ")
                 if (userQuery.isNotBlank()) {
                     append("User's specific question or request: \"$userQuery\". ")
                 }
@@ -136,11 +372,19 @@ object ScreenVisualAnalyzer {
                 append("     {\n")
                 append("       \"actionType\": \"click|type|scroll|open_app|system\",\n")
                 append("       \"title\": \"Short button label in English or Bengali\",\n")
+                append("       \"elementName\": \"Semantic UI element role/name (e.g. Search Input, Submit Button)\",\n")
                 append("       \"description\": \"What will happen when Jarvis executes this action in Bengali\",\n")
-                append("       \"targetTextOrId\": \"The exact visible button text or element to click/type\"\n")
+                append("       \"targetTextOrId\": \"The exact visible button text or element to click/type\",\n")
+                append("       \"viewId\": \"Android resource view ID if visible or null\",\n")
+                append("       \"elementType\": \"Button|TextField|Icon|Toggle|ListItem\",\n")
+                append("       \"clickable\": true,\n")
+                append("       \"centerNorm\": [0.5, 0.5],\n")
+                append("       \"bounds\": [0, 0, 100, 100],\n")
+                append("       \"confidence\": 0.9\n")
                 append("     }\n")
                 append("  ]\n")
                 append("}\n")
+                append("Use normalized [0.0..1.0] coordinates in centerNorm ([x, y]) and calibrated confidence [0.0..1.0]. ")
                 append("Ensure the JSON is strictly valid with no markdown backticks surrounding it.")
             }
 
@@ -186,7 +430,7 @@ object ScreenVisualAnalyzer {
                     val responseBody = response.body?.string() ?: ""
 
                     if (response.isSuccessful) {
-                        return@withContext parseGeminiResponse(responseBody)
+                        return@withContext parseGeminiResponse(responseBody, bitmap.width, bitmap.height)
                     } else {
                         lastError = RuntimeException("Model $model returned HTTP ${response.code}: $responseBody")
                     }
@@ -202,12 +446,19 @@ object ScreenVisualAnalyzer {
                 detectedApp = "অজানা",
                 screenDescription = "Error during analysis: ${e.message}",
                 suggestions = emptyList(),
-                rawAiResponse = e.stackTraceToString()
+                rawAiResponse = e.stackTraceToString(),
+                frameWidth = bitmap.width,
+                frameHeight = bitmap.height
             )
         }
     }
 
-    private fun parseGeminiResponse(responseJsonStr: String): ScreenVisualAnalysis {
+    internal fun parseGeminiResponse(
+        responseJsonStr: String,
+        frameWidth: Int = 0,
+        frameHeight: Int = 0
+    ): ScreenVisualAnalysis {
+        val captureTime = System.currentTimeMillis()
         return try {
             val root = JSONObject(responseJsonStr)
             val candidates = root.optJSONArray("candidates")
@@ -232,12 +483,36 @@ object ScreenVisualAnalyzer {
             if (suggArray != null) {
                 for (i in 0 until suggArray.length()) {
                     val item = suggArray.optJSONObject(i) ?: continue
+                    val centerArr = item.optJSONArray("centerNorm")
+                    val boundsArr = item.optJSONArray("bounds")
+                    val cX = centerArr?.optDouble(0)?.takeIf { !it.isNaN() }?.toFloat()?.coerceIn(0f, 1f)
+                    val cY = centerArr?.optDouble(1)?.takeIf { !it.isNaN() }?.toFloat()?.coerceIn(0f, 1f)
+                    val bLeft = boundsArr?.optInt(0, 0) ?: 0
+                    val bTop = boundsArr?.optInt(1, 0) ?: 0
+                    val bRight = boundsArr?.optInt(2, 0) ?: 0
+                    val bBottom = boundsArr?.optInt(3, 0) ?: 0
+
                     suggestionsList.add(
                         ScreenActionSuggestion(
                             actionType = item.optString("actionType", "click"),
                             title = item.optString("title", "অ্যাকশন ${i + 1}"),
                             description = item.optString("description", ""),
-                            targetTextOrId = item.optString("targetTextOrId", null)
+                            targetTextOrId = item.optString("targetTextOrId", "").ifBlank { null },
+                            viewId = item.optString("viewId", "").ifBlank { null },
+                            elementName = item.optString("elementName", "").ifBlank { null },
+                            elementType = item.optString("elementType", "Button"),
+                            clickable = item.optBoolean("clickable", true),
+                            inputPayload = item.optString("inputPayload", "").ifBlank { null },
+                            boundsLeft = bLeft,
+                            boundsTop = bTop,
+                            boundsRight = bRight,
+                            boundsBottom = bBottom,
+                            centerNormX = cX,
+                            centerNormY = cY,
+                            confidence = item.optDouble("confidence", 0.75).toFloat().coerceIn(0f, 1f),
+                            screenshotTimestamp = captureTime,
+                            screenshotWidth = frameWidth,
+                            screenshotHeight = frameHeight
                         )
                     )
                 }
@@ -248,7 +523,10 @@ object ScreenVisualAnalyzer {
                 detectedApp = detectedApp,
                 screenDescription = screenDesc,
                 suggestions = suggestionsList,
-                rawAiResponse = rawText
+                rawAiResponse = rawText,
+                timestamp = captureTime,
+                frameWidth = frameWidth,
+                frameHeight = frameHeight
             )
         } catch (e: Exception) {
             ScreenVisualAnalysis(
@@ -256,7 +534,10 @@ object ScreenVisualAnalyzer {
                 detectedApp = "বর্তমান অ্যাপ",
                 screenDescription = responseJsonStr.take(300),
                 suggestions = emptyList(),
-                rawAiResponse = responseJsonStr
+                rawAiResponse = responseJsonStr,
+                timestamp = captureTime,
+                frameWidth = frameWidth,
+                frameHeight = frameHeight
             )
         }
     }

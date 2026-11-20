@@ -475,6 +475,40 @@ object ActionApprovalRegistry {
     }
 
     /**
+     * Verifies whether an active approved or in-flight dispatch record currently authorizes
+     * a sensitive action (e.g., WhatsApp send) for the matching tool, recipient, and message.
+     */
+    fun hasActiveApprovalFor(
+        toolNames: Set<String>,
+        recipientQuery: String = "",
+        messageText: String = ""
+    ): Boolean {
+        cleanupExpired()
+        val normRecipient = recipientQuery.trim().lowercase(Locale.ROOT)
+        val normPhone = recipientQuery.replace("[^0-9+]".toRegex(), "")
+        val msgHash = if (messageText.isNotBlank()) sha256(messageText.trim()) else null
+        synchronized(lock) {
+            val allActive = inFlightDispatches.values + approvedRecords.values
+            return allActive.any { rec ->
+                if (rec.isExpired() || rec.toolName !in toolNames) return@any false
+                if (rec.approvalStatus != ApprovalStatus.APPROVED && rec.dispatchStatus != DispatchStatus.DISPATCHED) {
+                    return@any false
+                }
+                val messageMatches = msgHash == null ||
+                    rec.messageContentHash == msgHash ||
+                    rec.messageContentHash == sha256("")
+                val recipientMatches = normRecipient.isBlank() ||
+                    rec.recipientId.isBlank() ||
+                    rec.recipientId == normRecipient ||
+                    normRecipient.contains(rec.recipientId) ||
+                    rec.recipientId.contains(normRecipient) ||
+                    (normPhone.length >= 6 && rec.recipientId.replace("[^0-9+]".toRegex(), "").endsWith(normPhone.takeLast(6)))
+                messageMatches && recipientMatches
+            }
+        }
+    }
+
+    /**
      * Marks an in-flight approval as CONSUMED upon execution completion so it can never be replayed.
      */
     fun markExecutionFinished(approvalId: String?, success: Boolean, verified: Boolean) {

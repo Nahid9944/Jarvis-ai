@@ -298,55 +298,7 @@ object PermissionRegistry {
             iconKey = "event"
         ),
 
-        // 16. Media Images
-        PermissionSpec(
-            id = "media_images",
-            kind = PermissionKind.RUNTIME,
-            androidPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                listOf(Manifest.permission.READ_MEDIA_IMAGES)
-            } else {
-                listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-            },
-            titleBn = "ছবি ও ডকুমেন্ট গ্যালারি",
-            whyBn = "ব্যবহারকারীর নির্বাচিত ছবি বা ডকুমেন্ট এআই দিয়ে এনালাইসিস করার জন্য প্রয়োজন।",
-            whatItEnablesBn = "নির্বাচিত ইমেজ বিশ্লেষণ ও ভিজ্যুয়াল প্রশ্নোত্তর",
-            privacyNoteBn = "নির্বাচিত ছবি ছাড়া আপনার গ্যালারির অন্য কোনো ছবি দেখা হয় না।",
-            isGranted = { ctx ->
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    checkRuntimePermissions(ctx, listOf(Manifest.permission.READ_MEDIA_IMAGES))
-                } else {
-                    checkRuntimePermissions(ctx, listOf(Manifest.permission.READ_EXTERNAL_STORAGE))
-                }
-            },
-            toolIds = listOf("analyzeGalleryImage", "readTextFromImage"),
-            iconKey = "photo_library"
-        ),
-
-        // 17. Media Audio
-        PermissionSpec(
-            id = "media_audio",
-            kind = PermissionKind.RUNTIME,
-            androidPermissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                listOf(Manifest.permission.READ_MEDIA_AUDIO)
-            } else {
-                listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
-            },
-            titleBn = "অডিও ফাইল এক্সেস",
-            whyBn = "ভয়েস নোট বা অডিও রেকর্ডিং প্লে করে টেক্সটে রূপান্তর।",
-            whatItEnablesBn = "অডিও ভয়েস নোট প্লে ও ট্রান্সক্রিপশন",
-            privacyNoteBn = "শুধুমাত্র নির্বাচিত অডিও ফাইল প্রসেস করা হয়।",
-            isGranted = { ctx ->
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    checkRuntimePermissions(ctx, listOf(Manifest.permission.READ_MEDIA_AUDIO))
-                } else {
-                    checkRuntimePermissions(ctx, listOf(Manifest.permission.READ_EXTERNAL_STORAGE))
-                }
-            },
-            toolIds = listOf("transcribeAudioFile", "playRecordedNote"),
-            iconKey = "audiotrack"
-        ),
-
-        // 18. Notification Listener (Special Access)
+        // 16. Notification Listener (Special Access)
         PermissionSpec(
             id = "notification_listener",
             kind = PermissionKind.SPECIAL_ACCESS,
@@ -529,7 +481,8 @@ object PermissionRegistry {
             isGranted = { ctx ->
                 try {
                     val pm = ctx.packageManager
-                    pm.getInstalledApplications(0).isNotEmpty()
+                    val mainIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                    pm.queryIntentActivities(mainIntent, 0).isNotEmpty() || pm.getInstalledApplications(0).isNotEmpty()
                 } catch (e: Exception) {
                     true
                 }

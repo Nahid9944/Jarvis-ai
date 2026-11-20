@@ -151,11 +151,64 @@ class JarvisSkillRecorder(
             "BACK", "HOME", "WAIT", "WAIT_FOR_ELEMENT", "VERIFY_TEXT"
         )
 
+        data class SkillValidationResult(
+            val isValid: Boolean,
+            val recommendedStatus: String,
+            val issues: List<String>,
+            val validatedStepCount: Int
+        )
+
+        /**
+         * Dry-run schema & safety validator ensuring learned playbooks contain well-formed,
+         * non-empty steps without raw secrets before marking a skill ACTIVE.
+         */
+        fun validateSkillPlaybook(
+            steps: List<JarvisSkillStepEntity>
+        ): SkillValidationResult {
+            val issues = mutableListOf<String>()
+            if (steps.isEmpty()) {
+                issues.add("কোনো কার্যকর অ্যাকশন ধাপ (Step) নেই")
+                return SkillValidationResult(false, "DRAFT", issues, 0)
+            }
+            if (steps.size > 25) {
+                issues.add("সর্বোচ্চ ২৫টি ধাপের সীমা অতিক্রম করেছে (${steps.size})")
+            }
+            steps.forEachIndexed { idx, step ->
+                val num = idx + 1
+                if (step.actionType !in ALLOWED_ACTION_TYPES) {
+                    issues.add("ধাপ $num: অসমর্থিত অ্যাকশন টাইপ '${step.actionType}'")
+                }
+                when (step.actionType) {
+                    "OPEN_APP" -> if (step.targetViewId.isNullOrBlank() && step.targetText.isNullOrBlank()) {
+                        issues.add("ধাপ $num (OPEN_APP): অ্যাপ প্যাকেজ বা নাম ফাঁকা")
+                    }
+                    "CLICK" -> if (step.targetText.isNullOrBlank() && step.targetViewId.isNullOrBlank() &&
+                        step.targetContentDescription.isNullOrBlank() && step.boundsInScreen.isNullOrBlank()
+                    ) {
+                        issues.add("ধাপ $num (CLICK): ক্লিকের টার্গেট উপাদান নির্দিষ্ট নয়")
+                    }
+                    "INPUT_TEXT" -> if (step.inputPayload.isNullOrBlank()) {
+                        issues.add("ধাপ $num (INPUT_TEXT): ইনপুট টেক্সট ফাঁকা")
+                    }
+                }
+                if (step.delayAfterMs < 0L || step.delayAfterMs > 15_000L) {
+                    issues.add("ধাপ $num: অনিরাপদ ডিলে মান (${step.delayAfterMs}ms)")
+                }
+            }
+            val valid = issues.isEmpty()
+            return SkillValidationResult(
+                isValid = valid,
+                recommendedStatus = if (valid) "ACTIVE" else "DRAFT",
+                issues = issues,
+                validatedStepCount = steps.size
+            )
+        }
+
         /**
          * Voice / Natural-Language Teach Mode for non-programmers.
          * Converts Bengali/Banglish/English step instructions into a persisted,
          * parameterized JarvisSkillEntity + steps without touching code or accessibility recording.
-         * Marks 0-step skills honestly as DRAFT rather than fake-ACTIVE.
+         * Marks 0-step or schema-invalid skills honestly as DRAFT rather than fake-ACTIVE.
          */
         suspend fun teachSkillFromNaturalLanguage(
             skillName: String,
@@ -178,6 +231,7 @@ class JarvisSkillRecorder(
             val stepEntities = parsedSteps.mapIndexed { idx, s ->
                 s.copy(skillId = skillId, stepIndex = idx + 1)
             }
+            val validation = validateSkillPlaybook(stepEntities)
             val inferredPkg = targetPackageName.ifBlank {
                 stepEntities.firstOrNull { it.actionType == "OPEN_APP" }?.targetViewId.orEmpty()
             }
@@ -199,14 +253,14 @@ class JarvisSkillRecorder(
                 if (skillName.isNotBlank() && skillName != skillNameBengali) put(skillName)
                 triggerPhrases.distinct().filter { it.isNotBlank() }.forEach { put(it) }
             }
-            val computedStatus = if (stepEntities.isEmpty()) "DRAFT" else "ACTIVE"
+            val computedStatus = validation.recommendedStatus
 
             val entity = JarvisSkillEntity(
                 skillId = skillId,
                 name = skillName.ifBlank { "Taught Skill" },
                 nameBengali = skillNameBengali.ifBlank { skillName.ifBlank { "শেখানো কাজ" } },
                 description = if (computedStatus == "DRAFT") {
-                    "ধাপ সনাক্ত করা যায়নি (খসড়া) — স্পষ্ট Action লিখুন"
+                    "খসড়া (DRAFT): ${validation.issues.joinToString("; ")}"
                 } else {
                     "ভয়েস বা সাধারণ নির্দেশনার মাধ্যমে শেখানো দক্ষতা"
                 },
@@ -428,23 +482,43 @@ class JarvisSkillRecorder(
 
         val stepEntities = currentSteps.map { it.toStepEntity(skillId) }
         val paramNames = extractParameterNames(stepEntities)
+        val validation = validateSkillPlaybook(stepEntities)
+
+        val sensitiveActionKeywords = listOf(
+            "send", "পাঠান", "pay", "টাকা", "comment", "কমেন্ট",
+            "post", "পোস্ট", "delete", "মুছুন", "transfer", "contact", "call", "কল"
+        )
+        val hasHighRiskAction = currentSteps.any { step ->
+            val combined = listOfNotNull(step.targetText, step.targetContentDescription, step.targetViewId, step.descriptionBengali)
+                .joinToString(" ")
+                .lowercase(java.util.Locale.ROOT)
+            (step.actionType == "CLICK" || step.actionType == "INPUT_TEXT") &&
+                sensitiveActionKeywords.any { kw -> combined.contains(kw) }
+        }
+
+        val baseDesc = description.ifBlank { "ব্যবহারকারীর প্রদর্শনী মাধ্যমে শেখা ওয়ার্কফ্লো: $currentSkillNameBengali" }
+        val finalDescription = if (!validation.isValid) {
+            "খসড়া (DRAFT - পর্যালোচনা প্রয়োজন): ${validation.issues.joinToString("; ")}"
+        } else {
+            "$baseDesc [খসড়া/DRAFT — ব্যবহারের আগে অনুমোদন করুন]"
+        }
 
         val skillEntity = JarvisSkillEntity(
             skillId = skillId,
             name = currentSkillName,
             nameBengali = currentSkillNameBengali,
-            description = description.ifBlank { "ব্যবহারকারীর প্রদর্শনী মাধ্যমে শেখা ওয়ার্কফ্লো: $currentSkillNameBengali" },
+            description = finalDescription,
             triggerPhrasesJson = triggerPhrases.toString(),
             targetPackageName = currentTargetPackage,
             targetAppName = currentTargetAppName,
             category = category,
-            riskLevel = if (currentSteps.any { it.actionType == "CLICK" && (it.targetText?.contains("Send") == true || it.targetText?.contains("পাঠান") == true || it.targetText?.contains("Pay") == true) }) "HIGH" else "MEDIUM",
-            requiresConfirmation = currentSteps.any { it.actionType == "CLICK" && (it.targetText?.contains("Pay") == true || it.targetText?.contains("টাকা") == true) },
+            riskLevel = if (hasHighRiskAction) "HIGH" else "MEDIUM",
+            requiresConfirmation = hasHighRiskAction,
             requiredPermissionsJson = "[\"ACCESSIBILITY_SERVICE\"]",
             stepsJson = stepsJsonArray.toString(),
             stepCount = currentSteps.size,
             sourceType = "DEMONSTRATION",
-            status = "ACTIVE",
+            status = "DRAFT",
             version = 1,
             parametersSchemaJson = JSONArray(paramNames).toString()
         )
@@ -456,8 +530,26 @@ class JarvisSkillRecorder(
         _recorderState.value = SkillRecorderState.COMPLETED
         _activeSessionId.value = null
 
-        Log.i(TAG, "Skill successfully saved: $skillId with ${currentSteps.size} steps")
+        Log.i(TAG, "Skill saved as DRAFT pending approval: $skillId with ${currentSteps.size} steps (valid=${validation.isValid})")
         skillEntity
+    }
+
+    /**
+     * Validates a recorded DRAFT skill and explicitly activates it after user review.
+     */
+    suspend fun approveAndActivateRecordedSkill(
+        skillId: String,
+        repository: JarvisSkillRepository
+    ): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val skill = repository.getSkillById(skillId)
+            ?: return@withContext false to "স্কিল '$skillId' খুঁজে পাওয়া যায়নি।"
+        val steps = repository.getStepsForSkill(skillId)
+        val validation = validateSkillPlaybook(steps)
+        if (!validation.isValid) {
+            return@withContext false to "স্কিল ভ্যালিডেশন ব্যর্থ: ${validation.issues.joinToString("; ")}"
+        }
+        repository.setSkillEnabled(skillId, true)
+        true to "স্কিল '${skill.nameBengali}' অনুমোদন ও সক্রিয় (ACTIVE) করা হয়েছে।"
     }
 
     /**

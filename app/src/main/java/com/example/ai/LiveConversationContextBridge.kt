@@ -81,11 +81,21 @@ object LiveConversationContextBridge {
         if (state != LiveSessionState.CONNECTED && state != LiveSessionState.LISTENING) {
             return emptyList()
         }
+        val listener = flushListener ?: return emptyList()
         val drained = drainPendingContexts()
         if (drained.isNotEmpty()) {
             try {
-                flushListener?.invoke(drained)
+                listener.invoke(drained)
             } catch (_: Exception) {
+                synchronized(queueLock) {
+                    drained.reversed().forEach { pkt ->
+                        if (pendingQueue.size < MAX_QUEUE_SIZE) {
+                            pendingQueue.addFirst(pkt)
+                        }
+                    }
+                    _queuedCount.value = pendingQueue.size
+                }
+                return emptyList()
             }
         }
         return drained

@@ -162,7 +162,10 @@ class ScreenAndContactPerceptionUnitTest {
         val fallback = com.example.ai.AiAgentRegistry.getAgentById("unknown_invalid_agent")
         assertEquals(com.example.ai.AiAgentRegistry.JARVIS_MASTER.id, fallback.id)
 
-        assertEquals(12, com.example.ai.AiAgentRegistry.ALL_AGENTS.size)
+        assertEquals(14, com.example.ai.AiAgentRegistry.ALL_AGENTS.size)
+        assertEquals("home_developer", com.example.ai.AiAgentRegistry.getAgentById("home_developer").id)
+        assertEquals("intelligent_agent", com.example.ai.AiAgentRegistry.getAgentById("intelligent_agent").id)
+        assertTrue(com.example.ai.AiAgentRegistry.JARVIS_MASTER.isController)
     }
 }
 

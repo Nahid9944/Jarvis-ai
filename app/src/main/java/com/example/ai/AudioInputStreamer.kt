@@ -96,6 +96,7 @@ class AudioInputStreamer(
 
             if (candidateRecord == null || candidateRecord.state != AudioRecord.STATE_INITIALIZED) {
                 candidateRecord?.release()
+                com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.GEMINI_LIVE_STREAM)
                 onError("মাইক্রোফোন আরম্ভ করা সম্ভব হয়নি (ডিভাইসে অডিও ট্র্যাক অনুপলব্ধ)")
                 return false
             }

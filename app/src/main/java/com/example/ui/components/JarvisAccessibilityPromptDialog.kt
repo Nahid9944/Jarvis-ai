@@ -3,9 +3,12 @@ package com.example.ui.components
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccessibilityNew
 import androidx.compose.material.icons.filled.CheckCircle
@@ -47,6 +50,7 @@ fun JarvisAccessibilityPromptDialog(
 ) {
     val context = LocalContext.current
     var isGranted by remember { mutableStateOf(JarvisDeviceAutomationHelper.isAccessibilityGranted(context)) }
+    var isDisclosureAccepted by remember { mutableStateOf(false) }
 
     // Pulse animation for holographic effect
     val infiniteTransition = rememberInfiniteTransition(label = "hud_pulse")
@@ -94,6 +98,7 @@ fun JarvisAccessibilityPromptDialog(
                             )
                         )
                     )
+                    .verticalScroll(rememberScrollState())
                     .padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -214,7 +219,59 @@ fun JarvisAccessibilityPromptDialog(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(18.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Google Play Prominent Disclosure & Affirmative Consent Checkbox
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF0A1628),
+                        border = BorderStroke(1.dp, CyanGlow.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isDisclosureAccepted = !isDisclosureAccepted }
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "গোপনীয়তা ও ব্যবহার নীতি (Prominent Disclosure)",
+                                fontSize = 11.5.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = CyanGlow
+                            )
+                            Text(
+                                text = "NAHID AI AccessibilityService API শুধুমাত্র আপনার নির্দেশে স্ক্রিনে ট্যাপ, স্ক্রল, টেক্সট ইনপুট এবং স্ক্রিন পড়ার জন্য ব্যবহৃত হয়। কোনো ব্যক্তিগত তথ্য, পাসওয়ার্ড বা ওটিপি ব্যাকগ্রাউন্ডে সংগ্রহ বা শেয়ার করা হয় না। আপনি যেকোনো সময় Android Settings থেকে এটি বন্ধ করতে পারবেন।",
+                                fontSize = 10.5.sp,
+                                color = Color(0xFFCBD5E1),
+                                lineHeight = 15.sp
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Checkbox(
+                                    checked = isDisclosureAccepted,
+                                    onCheckedChange = { isDisclosureAccepted = it },
+                                    modifier = Modifier.testTag("accessibility_consent_checkbox"),
+                                    colors = CheckboxDefaults.colors(
+                                        checkedColor = CyanGlow,
+                                        checkmarkColor = DarkSpaceBg,
+                                        uncheckedColor = AmberWarn
+                                    )
+                                )
+                                Text(
+                                    text = "আমি উপরের Accessibility তথ্য পড়েছি ও ব্যবহারের সম্মতি দিচ্ছি।",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color.White,
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
                 }
 
                 // Action Buttons
@@ -227,20 +284,23 @@ fun JarvisAccessibilityPromptDialog(
                             onClick = {
                                 JarvisDeviceAutomationHelper.openAccessibilitySettings(context)
                             },
+                            enabled = isDisclosureAccepted,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(48.dp)
                                 .testTag("grant_accessibility_button"),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = CyanGlow,
-                                contentColor = DarkSpaceBg
+                                contentColor = DarkSpaceBg,
+                                disabledContainerColor = Color(0xFF1E293B),
+                                disabledContentColor = Color(0xFF64748B)
                             ),
                             shape = RoundedCornerShape(14.dp)
                         ) {
                             Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "সেটিংস থেকে চালু করুন",
+                                text = if (isDisclosureAccepted) "সেটিংস থেকে চালু করুন" else "আগে সম্মতি টিক দিন",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold
                             )

@@ -32,19 +32,36 @@ class JarvisBackgroundService : Service() {
         const val NOTIFICATION_ID = 5001
         const val ACTION_START = "ACTION_START_JARVIS"
         const val ACTION_STOP = "ACTION_STOP_JARVIS"
+        const val ACTION_PAUSE = "ACTION_PAUSE_JARVIS"
+        const val ACTION_RESUME = "ACTION_RESUME_JARVIS"
+        const val ACTION_EMERGENCY_STOP = "ACTION_EMERGENCY_STOP_JARVIS"
 
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
-        fun start(context: Context) {
+        private val _isPaused = MutableStateFlow(false)
+        val isPaused: StateFlow<Boolean> = _isPaused.asStateFlow()
+
+        private var onPauseRuntimeHook: (() -> Unit)? = null
+        private var onResumeRuntimeHook: (() -> Unit)? = null
+
+        fun registerRuntimeHooks(
+            onPause: (() -> Unit)?,
+            onResume: (() -> Unit)?
+        ) {
+            onPauseRuntimeHook = onPause
+            onResumeRuntimeHook = onResume
+        }
+
+        fun start(context: Context): Boolean {
             val hasMic = ContextCompat.checkSelfPermission(
                 context,
                 android.Manifest.permission.RECORD_AUDIO
             ) == PackageManager.PERMISSION_GRANTED
 
-            if (!hasMic) return
+            if (!hasMic) return false
 
-            try {
+            return try {
                 val intent = Intent(context, JarvisBackgroundService::class.java).apply {
                     action = ACTION_START
                 }
@@ -53,8 +70,9 @@ class JarvisBackgroundService : Service() {
                 } else {
                     context.startService(intent)
                 }
-            } catch (e: Exception) {
-                // Safeguard against Background service restrictions
+                true
+            } catch (_: Exception) {
+                false
             }
         }
 
@@ -64,8 +82,27 @@ class JarvisBackgroundService : Service() {
                     action = ACTION_STOP
                 }
                 context.startService(intent)
-            } catch (e: Exception) {
-                // ignore
+            } catch (_: Exception) {
+            }
+        }
+
+        fun pause(context: Context) {
+            try {
+                val intent = Intent(context, JarvisBackgroundService::class.java).apply {
+                    action = ACTION_PAUSE
+                }
+                context.startService(intent)
+            } catch (_: Exception) {
+            }
+        }
+
+        fun resume(context: Context) {
+            try {
+                val intent = Intent(context, JarvisBackgroundService::class.java).apply {
+                    action = ACTION_RESUME
+                }
+                context.startService(intent)
+            } catch (_: Exception) {
             }
         }
     }
@@ -77,19 +114,91 @@ class JarvisBackgroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> {
+            ACTION_EMERGENCY_STOP -> {
+                com.example.util.JarvisEmergencyStopCoordinator.triggerEmergencyStop(this)
+                _isPaused.value = false
                 stopBackgroundMode()
                 return START_NOT_STICKY
             }
+            ACTION_STOP -> {
+                _isPaused.value = false
+                try {
+                    onPauseRuntimeHook?.invoke()
+                } catch (_: Throwable) {
+                }
+                stopBackgroundMode()
+                return START_NOT_STICKY
+            }
+            ACTION_PAUSE -> {
+                _isPaused.value = true
+                try {
+                    onPauseRuntimeHook?.invoke()
+                } catch (_: Throwable) {
+                }
+                com.example.audio.HandsFreeSessionController.updateHudState(
+                    com.example.audio.AssistantVoiceHudState.PAUSED
+                )
+                updateNotification()
+                return START_STICKY
+            }
+            ACTION_RESUME -> {
+                _isPaused.value = false
+                com.example.util.JarvisEmergencyStopCoordinator.resetEmergencyStop()
+                try {
+                    onResumeRuntimeHook?.invoke()
+                } catch (_: Throwable) {
+                }
+                val owner = com.example.audio.MicrophoneCoordinator.currentOwner.value
+                val nextHud = when {
+                    owner == com.example.audio.MicOwner.GEMINI_LIVE_STREAM -> com.example.audio.AssistantVoiceHudState.LISTENING
+                    JarvisWakeWordService.isRunning.value -> com.example.audio.AssistantVoiceHudState.WAKE_WORD_ARMED
+                    else -> com.example.audio.AssistantVoiceHudState.IDLE
+                }
+                com.example.audio.HandsFreeSessionController.updateHudState(nextHud)
+                updateNotification()
+                return START_STICKY
+            }
             ACTION_START, null -> {
+                val hasMic = ContextCompat.checkSelfPermission(
+                    this,
+                    android.Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (!hasMic) {
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
                 startBackgroundMode()
             }
         }
         return START_STICKY
     }
 
-    private fun startBackgroundMode() {
-        _isRunning.value = true
+    private fun buildNotification(): Notification {
+        val paused = _isPaused.value
+        val micOwner = com.example.audio.MicrophoneCoordinator.currentOwner.value
+        val wakeRunning = JarvisWakeWordService.isRunning.value
+        val titleText = when {
+            paused -> "NAHID AI • ব্যাকগ্রাউন্ড বিরতি"
+            micOwner == com.example.audio.MicOwner.GEMINI_LIVE_STREAM -> "NAHID AI • লাইভ ভয়েস সক্রিয়"
+            wakeRunning || micOwner == com.example.audio.MicOwner.OFFLINE_SPOTTER -> "NAHID AI • ওয়েক-ওয়ার্ড প্রস্তুত"
+            else -> "NAHID AI • ব্যাকগ্রাউন্ড সার্ভিস (স্ট্যান্ডবাই)"
+        }
+        val bodyText = when {
+            paused -> "মাইক্রোফোন ও ব্যাকগ্রাউন্ড লিসেনিং বিরতিতে আছে"
+            micOwner == com.example.audio.MicOwner.GEMINI_LIVE_STREAM -> "লাইভ ভয়েস মাইক্রোফোন স্ট্রিম চালু আছে"
+            wakeRunning || micOwner == com.example.audio.MicOwner.OFFLINE_SPOTTER -> "ওয়েক-ওয়ার্ড সক্রিয় — ডাকার সাথে সাথেই ভয়েস সেশন চালু হবে"
+            else -> "ফোরগ্রাউন্ড সার্ভিস প্রস্তুত — লাইভ ভয়েস বা ওয়েক-ওয়ার্ড সক্রিয় করলে অডিও চালু হবে"
+        }
+
+        val pauseResumeIntent = Intent(this, JarvisBackgroundService::class.java).apply {
+            action = if (paused) ACTION_RESUME else ACTION_PAUSE
+        }
+        val pauseResumePending = PendingIntent.getService(
+            this,
+            10,
+            pauseResumeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
 
         val stopIntent = Intent(this, JarvisBackgroundService::class.java).apply {
             action = ACTION_STOP
@@ -98,6 +207,16 @@ class JarvisBackgroundService : Service() {
             this,
             1,
             stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val emergencyIntent = Intent(this, JarvisBackgroundService::class.java).apply {
+            action = ACTION_EMERGENCY_STOP
+        }
+        val emergencyPendingIntent = PendingIntent.getService(
+            this,
+            11,
+            emergencyIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -111,19 +230,43 @@ class JarvisBackgroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("NAHID AI • লাইভ ভয়েস সক্রিয়")
-            .setContentText("নাহিদ এআই ব্যাকগ্রাউন্ডে সক্রিয় — অন্যান্য অ্যাপে গেলেও কমান্ড শুনছে...")
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(titleText)
+            .setContentText(bodyText)
             .setSmallIcon(R.drawable.ic_jarvis_logo)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setContentIntent(openAppPendingIntent)
             .addAction(
+                if (paused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause,
+                if (paused) "চালু করুন" else "বিরতি",
+                pauseResumePending
+            )
+            .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 "বন্ধ করুন",
                 stopPendingIntent
             )
+            .addAction(
+                android.R.drawable.ic_delete,
+                "জরুরি স্টপ",
+                emergencyPendingIntent
+            )
             .build()
+    }
+
+    private fun updateNotification() {
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.notify(NOTIFICATION_ID, buildNotification())
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun startBackgroundMode() {
+        _isRunning.value = true
+        _isPaused.value = false
+        val notification = buildNotification()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
@@ -138,6 +281,7 @@ class JarvisBackgroundService : Service() {
 
     private fun stopBackgroundMode() {
         _isRunning.value = false
+        _isPaused.value = false
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -164,6 +308,7 @@ class JarvisBackgroundService : Service() {
 
     override fun onDestroy() {
         _isRunning.value = false
+        _isPaused.value = false
         serviceScope.cancel()
         super.onDestroy()
     }

@@ -255,6 +255,16 @@ object GeminiLiveAnnouncementAdapter {
 
     fun getPendingCount(): Int = synchronized(lock) { pendingQueue.size }
 
+    fun removePendingByEventKey(eventKey: String) {
+        if (eventKey.isBlank()) return
+        synchronized(lock) {
+            val removed = pendingQueue.removeAll { it.eventKey == eventKey }
+            if (removed) {
+                _pendingAnnouncements.value = ArrayList(pendingQueue)
+            }
+        }
+    }
+
     fun clearQueue() {
         synchronized(lock) {
             pendingQueue.clear()

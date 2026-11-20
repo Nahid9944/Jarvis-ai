@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -7,6 +8,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
@@ -21,7 +23,15 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.example.MainActivity
+import com.example.audio.AssistantVoiceHudState
+import com.example.audio.HandsFreeSessionController
+import com.example.audio.MicrophoneCoordinator
+import com.example.audio.MicOwner
+import com.example.audio.OfflineWakeWordEngine
+import com.example.audio.WakeWordModelManager
+import com.example.util.JarvisEmergencyStopCoordinator
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -36,6 +46,12 @@ enum class WakeWordSensitivity(val level: Int, val titleBengali: String, val des
     MEDIUM(2, "মধ্যম (সাধারণ)", "স্ট্যান্ডার্ড সংবেদনশীলতা — স্বাভাবিক স্বরে 'Jarvis', 'Hey Jarvis', 'জারভিস', 'শোনো জারভিস' ইত্যাদি দ্রুত শনাক্ত করবে।"),
     HIGH(3, "উচ্চ (অতি সংবেদনশীল)", "উচ্চ সংবেদনশীলতা — ফিসফিসানি, দূরবর্তী বা আংশিক উচ্চারণেও তাৎক্ষণিক সক্রিয় হয়।")
 }
+
+data class WakeWordTriggerPayload(
+    val matchedPhrase: String,
+    val remainderCommand: String,
+    val fullText: String
+)
 
 class JarvisWakeWordService : Service() {
 
@@ -54,12 +70,20 @@ class JarvisWakeWordService : Service() {
         const val ACTION_STOP = "com.example.service.STOP_WAKEWORD"
         const val ACTION_PAUSE = "com.example.service.PAUSE_WAKEWORD"
         const val ACTION_RESUME = "com.example.service.RESUME_WAKEWORD"
+        const val ACTION_EMERGENCY_STOP = "com.example.service.EMERGENCY_STOP_WAKEWORD"
 
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
-        private val _wakeWordEvents = MutableSharedFlow<String>(extraBufferCapacity = 5)
-        val wakeWordEvents: SharedFlow<String> = _wakeWordEvents.asSharedFlow()
+        internal fun setRunningForTest(running: Boolean) {
+            _isRunning.value = running
+        }
+
+        private val _isPausedState = MutableStateFlow(false)
+        val isPausedState: StateFlow<Boolean> = _isPausedState.asStateFlow()
+
+        private val _wakeWordEvents = MutableSharedFlow<WakeWordTriggerPayload>(extraBufferCapacity = 5)
+        val wakeWordEvents: SharedFlow<WakeWordTriggerPayload> = _wakeWordEvents.asSharedFlow()
 
         private val _currentHearingText = MutableStateFlow("")
         val currentHearingText: StateFlow<String> = _currentHearingText.asStateFlow()
@@ -67,59 +91,12 @@ class JarvisWakeWordService : Service() {
         private val _sensitivityState = MutableStateFlow(WakeWordSensitivity.MEDIUM)
         val sensitivityState: StateFlow<WakeWordSensitivity> = _sensitivityState.asStateFlow()
 
-        private val LOW_SENSITIVITY_PATTERNS = listOf(
-            "jarvis",
-            "hey jarvis",
-            "জারভিস",
-            "এই জারভিস"
-        )
-
-        private val MEDIUM_SENSITIVITY_PATTERNS = listOf(
-            "jarvis",
-            "hey jarvis",
-            "hi jarvis",
-            "ok jarvis",
-            "hello jarvis",
-            "jarvis ai",
-            "জারভিস",
-            "এই জারভিস",
-            "হ্যালো জারভিস",
-            "ওহে জারভিস",
-            "শোনো জারভিস"
-        )
-
-        private val HIGH_SENSITIVITY_PATTERNS = listOf(
-            "jarvis",
-            "hey jarvis",
-            "hi jarvis",
-            "ok jarvis",
-            "hello jarvis",
-            "jarvis ai",
-            "জারভিস",
-            "এই জারভিস",
-            "হ্যালো জারভিস",
-            "ওহে জারভিস",
-            "শোনো জারভিস",
-            "javis",
-            "charvis",
-            "সারভিস",
-            "জার্ভিস",
-            "জারবিস",
-            "হে জারভিস",
-            "জার্ভ",
-            "jarv",
-            "service",
-            "jar vis",
-            "jarvi"
-        )
-
         fun setSensitivity(context: Context, sensitivity: WakeWordSensitivity) {
             _sensitivityState.value = sensitivity
             try {
                 val prefs = context.getSharedPreferences("jarvis_wakeword_prefs", Context.MODE_PRIVATE)
                 prefs.edit().putString("sensitivity_level", sensitivity.name).apply()
-            } catch (e: Exception) {
-                // ignore
+            } catch (_: Exception) {
             }
         }
 
@@ -128,46 +105,69 @@ class JarvisWakeWordService : Service() {
                 val prefs = context.getSharedPreferences("jarvis_wakeword_prefs", Context.MODE_PRIVATE)
                 val saved = prefs.getString("sensitivity_level", WakeWordSensitivity.MEDIUM.name)
                 WakeWordSensitivity.valueOf(saved ?: WakeWordSensitivity.MEDIUM.name)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 WakeWordSensitivity.MEDIUM
             }
         }
 
-        fun start(context: Context) {
+        fun start(context: Context): Boolean {
+            val hasMic = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasMic) return false
+
+            WakeWordModelManager.setOptInEnabled(context, true)
             val intent = Intent(context, JarvisWakeWordService::class.java).apply {
                 action = ACTION_START
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            return try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+                true
+            } catch (_: Exception) {
+                false
             }
         }
 
         fun stop(context: Context) {
+            WakeWordModelManager.setOptInEnabled(context, false)
             val intent = Intent(context, JarvisWakeWordService::class.java).apply {
                 action = ACTION_STOP
             }
-            context.stopService(intent)
+            try {
+                context.stopService(intent)
+            } catch (_: Exception) {
+            }
         }
 
         fun pause(context: Context) {
             val intent = Intent(context, JarvisWakeWordService::class.java).apply {
                 action = ACTION_PAUSE
             }
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (_: Exception) {
+            }
         }
 
         fun resume(context: Context) {
             val intent = Intent(context, JarvisWakeWordService::class.java).apply {
                 action = ACTION_RESUME
             }
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (_: Exception) {
+            }
         }
     }
 
     override fun onCreate() {
         super.onCreate()
+        WakeWordModelManager.init(this)
         _sensitivityState.value = getSensitivity(this)
         createNotificationChannel()
         setupSpeechRecognizer()
@@ -175,19 +175,42 @@ class JarvisWakeWordService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_EMERGENCY_STOP -> {
+                JarvisEmergencyStopCoordinator.triggerEmergencyStop(this)
+                mainHandler.removeCallbacksAndMessages(null)
+                stopListening()
+                _isPausedState.value = false
+                _isRunning.value = false
+                HandsFreeSessionController.updateHudState(AssistantVoiceHudState.PAUSED)
+                stopSelf()
+                return START_NOT_STICKY
+            }
             ACTION_STOP -> {
                 mainHandler.removeCallbacksAndMessages(null)
+                stopListening()
+                _isPausedState.value = false
+                _isRunning.value = false
+                HandsFreeSessionController.updateHudState(AssistantVoiceHudState.IDLE)
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_PAUSE -> {
                 isPaused = true
+                _isPausedState.value = true
                 mainHandler.removeCallbacksAndMessages(null)
                 stopListening()
+                updateNotification()
+                HandsFreeSessionController.updateHudState(AssistantVoiceHudState.PAUSED)
                 return START_STICKY
             }
             ACTION_RESUME -> {
+                if (JarvisEmergencyStopCoordinator.isEmergencyStopActive.value) {
+                    JarvisEmergencyStopCoordinator.resetEmergencyStop()
+                }
                 isPaused = false
+                _isPausedState.value = false
+                updateNotification()
+                HandsFreeSessionController.updateHudState(AssistantVoiceHudState.WAKE_WORD_ARMED)
                 if (!GeminiLiveAnnouncementAdapter.isInActiveCall.value) {
                     startListening()
                 }
@@ -195,33 +218,107 @@ class JarvisWakeWordService : Service() {
             }
         }
 
+        // Permission check required on Android 14+ before starting foregroundServiceType="microphone"
+        val hasMic = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (!hasMic) {
+            Log.w(TAG, "Stop wake-word service: RECORD_AUDIO not granted.")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         startForegroundNotification()
         _isRunning.value = true
         isPaused = false
+        _isPausedState.value = false
+        HandsFreeSessionController.updateHudState(AssistantVoiceHudState.WAKE_WORD_ARMED)
         startListening()
         return START_STICKY
     }
 
-    private fun startForegroundNotification() {
+    private fun buildNotification(): Notification {
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        val pendingIntent = PendingIntent.getActivity(
+        val openPendingIntent = PendingIntent.getActivity(
             this,
             0,
             openAppIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("J.A.R.V.I.S. Wake-Word Engine")
-            .setContentText("Hands-free active: Say 'Jarvis' or 'জারভিস' anytime")
+        val pauseOrResumeIntent = Intent(this, JarvisWakeWordService::class.java).apply {
+            action = if (isPaused) ACTION_RESUME else ACTION_PAUSE
+        }
+        val pauseResumePending = PendingIntent.getService(
+            this,
+            2,
+            pauseOrResumeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val stopIntent = Intent(this, JarvisWakeWordService::class.java).apply {
+            action = ACTION_STOP
+        }
+        val stopPending = PendingIntent.getService(
+            this,
+            3,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val emergencyIntent = Intent(this, JarvisWakeWordService::class.java).apply {
+            action = ACTION_EMERGENCY_STOP
+        }
+        val emergencyPending = PendingIntent.getService(
+            this,
+            4,
+            emergencyIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val cap = WakeWordModelManager.inspectCapabilities(this)
+        val phrasesPreview = WakeWordModelManager.getCustomWakePhrases(this).take(3).joinToString(" / ")
+        val statusText = if (isPaused) {
+            "বিরতিতে আছে — চালু করতে Resume চাপুন"
+        } else {
+            "সক্রিয় ($phrasesPreview) • ${if (cap.isOnDeviceRecognitionAvailable) "On-Device" else "Hybrid"}"
+        }
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(if (isPaused) "NAHID AI • ওয়েক-ওয়ার্ড বিরতি" else "NAHID AI • হ্যান্ডস-ফ্রি সক্রিয়")
+            .setContentText(statusText)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentIntent(pendingIntent)
+            .setContentIntent(openPendingIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
+            .addAction(
+                if (isPaused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause,
+                if (isPaused) "চালু করুন" else "বিরতি",
+                pauseResumePending
+            )
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "বন্ধ করুন",
+                stopPending
+            )
+            .addAction(
+                android.R.drawable.ic_delete,
+                "জরুরি স্টপ",
+                emergencyPending
+            )
             .build()
+    }
 
+    private fun updateNotification() {
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.notify(NOTIFICATION_ID, buildNotification())
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun startForegroundNotification() {
+        val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
                 NOTIFICATION_ID,
@@ -237,10 +334,10 @@ class JarvisWakeWordService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Jarvis Wake-Word Engine",
+                "NAHID AI Wake-Word Engine",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Foreground listening channel for 'Jarvis' wake-word activation"
+                description = "Foreground listening channel for hands-free voice wake-word activation"
             }
             val nm = getSystemService(NotificationManager::class.java)
             nm?.createNotificationChannel(channel)
@@ -248,22 +345,52 @@ class JarvisWakeWordService : Service() {
     }
 
     private fun setupSpeechRecognizer() {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+        val hasStandard = SpeechRecognizer.isRecognitionAvailable(this)
+        val hasOnDevice = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            try {
+                SpeechRecognizer.isOnDeviceRecognitionAvailable(this)
+            } catch (_: Throwable) {
+                false
+            }
+        if (!hasStandard && !hasOnDevice) {
             Log.e(TAG, "SpeechRecognizer not available on this device")
             return
         }
 
         try {
             speechRecognizer?.destroy()
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+            speechRecognizer = when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && hasOnDevice -> {
+                    try {
+                        SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+                    } catch (_: Throwable) {
+                        SpeechRecognizer.createSpeechRecognizer(this)
+                    }
+                }
+                else -> SpeechRecognizer.createSpeechRecognizer(this)
+            }.apply {
                 setRecognitionListener(createListener())
+            }
+
+            val prefLang = try {
+                com.example.ai.AiSettingsRepository(this).settingsState.value.preferredLanguage
+            } catch (_: Exception) {
+                "bn"
+            }
+            val recognitionLocale = when (prefLang) {
+                "en" -> "en-US"
+                "bn" -> "bn-BD"
+                else -> Locale.getDefault().toLanguageTag()
             }
 
             recognizerIntent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toString())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                }
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, recognitionLocale)
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
             }
         } catch (e: Exception) {
@@ -289,11 +416,13 @@ class JarvisWakeWordService : Service() {
         override fun onError(error: Int) {
             isCurrentlyListening = false
             _currentHearingText.value = ""
-            // Schedule smooth restart after silence/timeout
-            if (!isPaused && _isRunning.value && !GeminiLiveAnnouncementAdapter.isInActiveCall.value) {
+            MicrophoneCoordinator.release(MicOwner.WAKE_WORD_SERVICE)
+            if (!isPaused && _isRunning.value && !GeminiLiveAnnouncementAdapter.isInActiveCall.value &&
+                !JarvisEmergencyStopCoordinator.isEmergencyStopActive.value
+            ) {
                 mainHandler.postDelayed({
                     startListening()
-                }, 400)
+                }, 450)
             }
         }
 
@@ -306,10 +435,12 @@ class JarvisWakeWordService : Service() {
                 checkTextForWakeWord(best, isPartial = false)
             }
 
-            if (!isPaused && _isRunning.value && !GeminiLiveAnnouncementAdapter.isInActiveCall.value) {
+            if (!isPaused && _isRunning.value && !GeminiLiveAnnouncementAdapter.isInActiveCall.value &&
+                !JarvisEmergencyStopCoordinator.isEmergencyStopActive.value
+            ) {
                 mainHandler.postDelayed({
                     startListening()
-                }, 300)
+                }, 350)
             }
         }
 
@@ -326,36 +457,47 @@ class JarvisWakeWordService : Service() {
     }
 
     private fun checkTextForWakeWord(spokenText: String, isPartial: Boolean) {
-        val sensitivity = _sensitivityState.value
-        // At LOW sensitivity, ignore partial speech to prevent accidental triggers
-        if (sensitivity == WakeWordSensitivity.LOW && isPartial) return
+        if (isPaused || JarvisEmergencyStopCoordinator.isEmergencyStopActive.value) return
+        val cooldown = WakeWordModelManager.getCooldownMs(this)
+        if (!OfflineWakeWordEngine.canTriggerNow(cooldownMs = cooldown)) return
 
-        val lower = spokenText.lowercase().trim()
-        val patterns = when (sensitivity) {
-            WakeWordSensitivity.LOW -> LOW_SENSITIVITY_PATTERNS
-            WakeWordSensitivity.MEDIUM -> MEDIUM_SENSITIVITY_PATTERNS
-            WakeWordSensitivity.HIGH -> HIGH_SENSITIVITY_PATTERNS
-        }
-
-        val detected = patterns.any { pattern -> lower.contains(pattern) }
-        if (detected) {
-            triggerWakeActivation(spokenText)
+        val phrases = WakeWordModelManager.getCustomWakePhrases(this)
+        val match = OfflineWakeWordEngine.matchWakePhrase(
+            spokenText = spokenText,
+            configuredPhrases = phrases,
+            sensitivity = _sensitivityState.value,
+            isPartial = isPartial
+        )
+        if (match.matched) {
+            OfflineWakeWordEngine.markTriggered()
+            triggerWakeActivation(spokenText, match.matchedPhrase, match.remainderCommand)
         }
     }
 
-    private fun triggerWakeActivation(text: String) {
-        Log.i(TAG, "Wake-Word DETECTED in: '$text'")
+    private fun triggerWakeActivation(fullText: String, matchedPhrase: String, remainderCommand: String) {
+        Log.i(TAG, "Wake-Word DETECTED phrase='$matchedPhrase' full='$fullText'")
         vibratePhone()
 
+        // Pause SpeechRecognizer cleanly and transfer mic ownership via HandsFreeSessionController
+        stopListening()
+
+        val cleanRemainder = remainderCommand.trim()
         serviceScope.launch {
-            _wakeWordEvents.emit(text)
+            _wakeWordEvents.emit(
+                WakeWordTriggerPayload(
+                    matchedPhrase = matchedPhrase,
+                    remainderCommand = cleanRemainder,
+                    fullText = fullText
+                )
+            )
         }
 
-        // Launch or bring Jarvis MainActivity to foreground
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra("EXTRA_WAKE_TRIGGERED", true)
-            putExtra("EXTRA_SPOKEN_TEXT", text)
+            putExtra("EXTRA_MATCHED_PHRASE", matchedPhrase)
+            putExtra("EXTRA_REMAINDER_COMMAND", cleanRemainder)
+            putExtra("EXTRA_SPOKEN_TEXT", fullText)
         }
         startActivity(launchIntent)
     }
@@ -372,15 +514,16 @@ class JarvisWakeWordService : Service() {
                 val v = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                 v?.vibrate(120)
             }
-        } catch (e: Exception) {
-            // ignore
+        } catch (_: Exception) {
         }
     }
 
     private fun startListening() {
-        if (isPaused || isCurrentlyListening || GeminiLiveAnnouncementAdapter.isInActiveCall.value) return
-        if (!com.example.audio.MicrophoneCoordinator.tryAcquire(com.example.audio.MicOwner.WAKE_WORD_SERVICE, preempt = false)) {
-            Log.d(TAG, "Wake-word recognizer deferred: mic owned by ${com.example.audio.MicrophoneCoordinator.currentOwner.value}")
+        if (isPaused || isCurrentlyListening || GeminiLiveAnnouncementAdapter.isInActiveCall.value ||
+            JarvisEmergencyStopCoordinator.isEmergencyStopActive.value
+        ) return
+        if (!MicrophoneCoordinator.tryAcquire(MicOwner.WAKE_WORD_SERVICE, preempt = false)) {
+            Log.d(TAG, "Wake-word recognizer deferred: mic owned by ${MicrophoneCoordinator.currentOwner.value}")
             return
         }
         try {
@@ -391,8 +534,7 @@ class JarvisWakeWordService : Service() {
             isCurrentlyListening = true
         } catch (e: Exception) {
             isCurrentlyListening = false
-            com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.WAKE_WORD_SERVICE)
-            // Re-setup on fatal error
+            MicrophoneCoordinator.release(MicOwner.WAKE_WORD_SERVICE)
             setupSpeechRecognizer()
         }
     }
@@ -401,22 +543,21 @@ class JarvisWakeWordService : Service() {
         try {
             speechRecognizer?.stopListening()
             speechRecognizer?.cancel()
-        } catch (e: Exception) {
-            // ignore
+        } catch (_: Exception) {
         }
         isCurrentlyListening = false
-        com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.WAKE_WORD_SERVICE)
+        MicrophoneCoordinator.release(MicOwner.WAKE_WORD_SERVICE)
     }
 
     override fun onDestroy() {
         _isRunning.value = false
+        _isPausedState.value = false
         isPaused = true
         mainHandler.removeCallbacksAndMessages(null)
         stopListening()
         try {
             speechRecognizer?.destroy()
-        } catch (e: Exception) {
-            // ignore
+        } catch (_: Exception) {
         }
         speechRecognizer = null
         serviceScope.cancel()

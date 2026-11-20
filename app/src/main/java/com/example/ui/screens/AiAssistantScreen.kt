@@ -123,6 +123,7 @@ fun AiAssistantScreen(
     val coroutineScope = rememberCoroutineScope()
 
     val liveState by viewModel.aiLiveState.collectAsState()
+    val voiceHudState by viewModel.voiceHudState.collectAsState()
     val statusMessage by viewModel.aiStatusMessage.collectAsState()
     val micLevel by viewModel.aiMicLevel.collectAsState()
     val outputLevel by viewModel.aiOutputLevel.collectAsState()
@@ -134,8 +135,15 @@ fun AiAssistantScreen(
     val chatHistory by viewModel.jarvisChatHistory.collectAsState()
     val unreadNotifCount by viewModel.unreadNotificationCount.collectAsState()
 
-    // 0: Live Voice / HUD, 1: Holographic History, 2: Agents, 3: Tools, 4: Memories, 5: Tasks, 6: Settings
+    // 0: Live Voice / HUD, 1: Holographic History, 2: Agents, 3: Tools, 4: Memories, 5: Tasks, 6: Settings, 7: Artifacts
     var selectedTab by remember { mutableIntStateOf(0) }
+    val requestedHudTab by viewModel.requestedHudTab.collectAsState()
+    LaunchedEffect(requestedHudTab) {
+        requestedHudTab?.let { target ->
+            selectedTab = target
+            viewModel.consumeRequestedHudTab()
+        }
+    }
 
     var showSettingsDialog by remember { mutableStateOf(false) }
     var textInput by remember { mutableStateOf("") }
@@ -296,11 +304,22 @@ fun AiAssistantScreen(
         }
     }
 
-    // Listen to background speech recognition wake-word events
+    // Listen to background speech recognition wake-word events & preempt mic cleanly via HandsFreeSessionController
     LaunchedEffect(Unit) {
-        com.example.service.JarvisWakeWordService.wakeWordEvents.collect { spokenText ->
-            if (spokenText.isNotBlank()) {
-                handleUserCommand(spokenText)
+        com.example.service.JarvisWakeWordService.wakeWordEvents.collect { payload ->
+            viewModel.handleWakeWordTrigger(
+                matchedPhrase = payload.matchedPhrase,
+                remainderCommand = payload.remainderCommand
+            ) { inlineCommand ->
+                handleUserCommand(inlineCommand)
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.wakeInlineCommands.collect { inlineCommand ->
+            if (inlineCommand.isNotBlank()) {
+                handleUserCommand(inlineCommand)
             }
         }
     }
@@ -354,6 +373,7 @@ fun AiAssistantScreen(
         topBar = {
             JarvisTopAppBar(
                 liveState = liveState,
+                voiceHudState = voiceHudState,
                 isBackgroundActive = isBackgroundActive,
                 isAccessibilityActive = isAccessibilityActive,
                 unreadNotificationCount = unreadNotifCount,
@@ -702,6 +722,7 @@ fun AiAssistantScreen(
 @Composable
 private fun JarvisTopAppBar(
     liveState: LiveSessionState,
+    voiceHudState: com.example.audio.AssistantVoiceHudState,
     isBackgroundActive: Boolean,
     isAccessibilityActive: Boolean,
     unreadNotificationCount: Int,
@@ -772,18 +793,35 @@ private fun JarvisTopAppBar(
                         )
                         PulsingStatusDot(liveState = liveState)
                     }
+                    val subtitleText = when (voiceHudState) {
+                        com.example.audio.AssistantVoiceHudState.LISTENING -> "VOICE LIVE • LISTENING"
+                        com.example.audio.AssistantVoiceHudState.SPEAKING -> "SPEAKING"
+                        com.example.audio.AssistantVoiceHudState.THINKING -> "THINKING"
+                        com.example.audio.AssistantVoiceHudState.TOOL_EXECUTING -> "TOOL EXECUTING"
+                        com.example.audio.AssistantVoiceHudState.VERIFYING -> "VERIFYING"
+                        com.example.audio.AssistantVoiceHudState.WAITING_FOR_PERMISSION -> "PERMISSION NEEDED"
+                        com.example.audio.AssistantVoiceHudState.WAITING_FOR_CONFIRMATION -> "CONFIRMATION NEEDED"
+                        com.example.audio.AssistantVoiceHudState.WAKE_WORD_ARMED -> "WAKE-WORD ARMED"
+                        com.example.audio.AssistantVoiceHudState.PAUSED -> "PAUSED"
+                        com.example.audio.AssistantVoiceHudState.OFFLINE -> "OFFLINE"
+                        com.example.audio.AssistantVoiceHudState.ERROR -> "OFFLINE / ERROR"
+                        else -> when {
+                            liveState == LiveSessionState.CONNECTING -> "CONNECTING"
+                            isBackgroundActive -> "BG SERVICE ON"
+                            else -> "J.A.R.V.I.S. OS"
+                        }
+                    }
                     Text(
-                        text = when (liveState) {
-                            LiveSessionState.LISTENING -> "VOICE LIVE"
-                            LiveSessionState.SPEAKING -> "SPEAKING"
-                            LiveSessionState.THINKING, LiveSessionState.TOOL_EXECUTING -> "PROCESSING"
-                            LiveSessionState.CONNECTING -> "CONNECTING"
-                            LiveSessionState.ERROR -> "OFFLINE / ERROR"
-                            else -> if (isBackgroundActive) "BG SERVICE ON" else "J.A.R.V.I.S. OS"
-                        },
+                        text = subtitleText,
                         fontSize = 9.sp,
                         fontFamily = FontFamily.Monospace,
-                        color = if (liveState == LiveSessionState.ERROR) PinkNeon else CyanNeon.copy(alpha = 0.85f),
+                        color = when {
+                            voiceHudState == com.example.audio.AssistantVoiceHudState.ERROR ||
+                                liveState == LiveSessionState.ERROR -> PinkNeon
+                            voiceHudState == com.example.audio.AssistantVoiceHudState.WAITING_FOR_PERMISSION ||
+                                voiceHudState == com.example.audio.AssistantVoiceHudState.WAITING_FOR_CONFIRMATION -> AmberGlow
+                            else -> CyanNeon.copy(alpha = 0.85f)
+                        },
                         maxLines = 1
                     )
                 }
@@ -1289,7 +1327,7 @@ private fun JarvisLiveHudTab(
                     border = BorderStroke(1.2.dp, if (showInlineCamera) CyanNeon else TextWhite.copy(alpha = 0.55f)),
                     modifier = Modifier
                         .weight(1.1f)
-                        .heightIn(min = 42.dp)
+                        .heightIn(min = 48.dp)
                         .clickable {
                             viewModel.executeHudShortcutTool(
                                 if (showInlineCamera) "stopCameraVision" else "startCameraVision"
@@ -1328,7 +1366,7 @@ private fun JarvisLiveHudTab(
                     border = BorderStroke(1.2.dp, TextWhite.copy(alpha = 0.55f)),
                     modifier = Modifier
                         .weight(0.8f)
-                        .heightIn(min = 42.dp)
+                        .heightIn(min = 48.dp)
                         .clickable {
                             viewModel.executeHudShortcutTool("switchCameraLens") { res ->
                                 val msg = res.optString("summaryBengali", "ক্যামেরা লেন্স পরিবর্তন হয়েছে")
@@ -1369,7 +1407,7 @@ private fun JarvisLiveHudTab(
                     border = BorderStroke(1.2.dp, if (isSharingActive) BlueHolo else TextWhite.copy(alpha = 0.55f)),
                     modifier = Modifier
                         .weight(1.1f)
-                        .heightIn(min = 42.dp)
+                        .heightIn(min = 48.dp)
                         .clickable {
                             when (visionState) {
                                 com.example.util.ScreenVisionState.STOPPED -> {
@@ -1903,11 +1941,11 @@ private fun JarvisLiveHudTab(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Surface(
-                            shape = RoundedCornerShape(20.dp),
+                            shape = RoundedCornerShape(24.dp),
                             color = CardBg,
                             border = BorderStroke(1.3.dp, PinkNeon),
                             modifier = Modifier
-                                .heightIn(min = 38.dp)
+                                .heightIn(min = 48.dp)
                                 .clickable {
                                     val report = viewModel.triggerEmergencyStop()
                                     Toast.makeText(context, report.summaryBengali, Toast.LENGTH_SHORT).show()
@@ -1915,7 +1953,7 @@ private fun JarvisLiveHudTab(
                                 .testTag("hud_emergency_stop_button")
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
@@ -1938,7 +1976,7 @@ private fun JarvisLiveHudTab(
                         IconButton(
                             onClick = { viewModel.triggerInstantBargeIn("hud_speaker_mute") },
                             modifier = Modifier
-                                .size(38.dp)
+                                .size(48.dp)
                                 .clip(CircleShape)
                                 .background(BlueHolo.copy(alpha = 0.14f))
                                 .border(1.2.dp, BlueHolo.copy(alpha = 0.75f), CircleShape)
@@ -2255,10 +2293,43 @@ private fun JarvisLiveHudTab(
                 .padding(top = 6.dp, bottom = 4.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
+            val homeDevState by viewModel.homeDevState.collectAsState()
+            val devDotColor = Color(homeDevState.indicatorState.colorHex)
+
             LazyRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = SpaceSurface,
+                        border = BorderStroke(1.dp, devDotColor.copy(alpha = 0.75f)),
+                        modifier = Modifier
+                            .clickable { viewModel.navigateTo("home_developer") }
+                            .testTag("hud_home_developer_button")
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(devDotColor)
+                            )
+                            Icon(
+                                imageVector = Icons.Default.Code,
+                                contentDescription = "HOME DEVELOPER",
+                                tint = devDotColor,
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Text("HOME DEV", color = TextWhite, fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
                 item {
                     Surface(
                         shape = RoundedCornerShape(14.dp),
@@ -3169,11 +3240,84 @@ private fun JarvisCoreSettingsTab(
                 }
 
                 Text(
-                    text = "🔒 এই অপশন চালু করলে মাউথ স্পিকার সবসময় ব্যাকগ্রাউন্ডে ওপেন থাকবে। আপনি যখন যা বলবেন জারভিস তা সরাসরি শুনবে এবং নিজের কাজ করতে পারবে — এমনকি অ্যাপ থেকে বের হলেও।",
+                    text = "🔒 এই অপশন চালু করলে মাইক্রোফোন ব্যাকগ্রাউন্ডে সক্রিয় থাকবে। আপনি যখন যা বলবেন নাহিদ এআই তা শুনে স্বয়ংক্রিয়ভাবে কাজ করতে পারবে — নোটিফিকেশন থেকেও পজ/স্টপ করা যাবে।",
                     fontSize = 11.5.sp,
                     color = Color(0xFFCBD5E1),
                     lineHeight = 16.sp
                 )
+            }
+        }
+
+        // Hands-Free Wake Word & Default System Assistant Card
+        val ctx = LocalContext.current
+        val wakeOptIn by viewModel.wakeWordOptIn.collectAsState()
+        val wakeCaps = remember { com.example.audio.WakeWordModelManager.inspectCapabilities(ctx) }
+        val roleStatus = remember { com.example.service.JarvisAssistantRoleManager.getStatus(ctx) }
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = CardBg,
+            border = BorderStroke(1.dp, if (wakeOptIn) CyanNeon.copy(alpha = 0.6f) else Color(0xFF334155)),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "ওয়েক-ওয়ার্ড ও ডিফল্ট অ্যাসিস্ট্যান্ট",
+                            fontSize = 13.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextWhite
+                        )
+                        Text(
+                            text = "${wakeCaps.engineModeLabel} • ${settings.modelName}",
+                            fontSize = 10.sp,
+                            fontFamily = FontFamily.Monospace,
+                            color = CyanNeon
+                        )
+                    }
+                    Switch(
+                        checked = wakeOptIn,
+                        onCheckedChange = { enabled ->
+                            viewModel.setWakeWordOptIn(enabled)
+                            if (enabled) {
+                                com.example.service.JarvisWakeWordService.start(ctx)
+                            } else {
+                                com.example.service.JarvisWakeWordService.stop(ctx)
+                            }
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = SpaceDark,
+                            checkedTrackColor = CyanNeon
+                        )
+                    )
+                }
+                Text(
+                    text = roleStatus.statusBengali,
+                    fontSize = 11.sp,
+                    color = if (roleStatus.isDefaultAssistant) EmeraldNeon else AmberGlow
+                )
+                OutlinedButton(
+                    onClick = {
+                        try {
+                            ctx.startActivity(com.example.service.JarvisAssistantRoleManager.createSelectAssistantIntent(ctx))
+                        } catch (_: Exception) {
+                        }
+                    },
+                    border = BorderStroke(1.dp, BlueHolo.copy(alpha = 0.6f)),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Assistant, contentDescription = null, tint = BlueHolo, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("সিস্টেম ডিফল্ট অ্যাসিস্ট্যান্ট সেট করুন", fontSize = 12.sp, color = BlueHolo, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
 

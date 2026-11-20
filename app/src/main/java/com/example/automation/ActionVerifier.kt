@@ -10,7 +10,9 @@ object ActionVerifier {
         initialScreenHash: String,
         currentScreenHash: String,
         lastReplySuccess: Boolean = false,
-        mediaTitle: String? = null
+        mediaTitle: String? = null,
+        params: Map<String, String> = emptyMap(),
+        isMediaPlaying: Boolean = !mediaTitle.isNullOrBlank()
     ): Pair<Boolean, String> {
         return when (spec.type) {
             VerifyType.NODE_EXISTS -> {
@@ -42,7 +44,13 @@ object ActionVerifier {
             }
 
             VerifyType.LAST_OUTGOING_MESSAGE_EQUALS -> {
-                val expected = spec.expected?.trim() ?: ""
+                val expected = (spec.expected?.takeIf { it.isNotBlank() }
+                    ?: params["text"]
+                    ?: params["message"]
+                    ?: "").trim()
+                if (expected.isBlank()) {
+                    return Pair(false, "যাচাই ব্যর্থ: তুলনা করার জন্য কোনো প্রত্যাশিত বার্তা প্রদান করা হয়নি")
+                }
                 val visibleTexts = NodeSnapshot.readVisibleTextList(root)
                 val matched = visibleTexts.any { it.contains(expected.take(20), ignoreCase = true) }
                 if (matched) {
@@ -61,8 +69,8 @@ object ActionVerifier {
             }
 
             VerifyType.MEDIA_PLAYING -> {
-                if (!mediaTitle.isNullOrBlank()) {
-                    Pair(true, "যাচাই সফল: মিডিয়া সক্রিয়ভাবে চলছে ($mediaTitle)")
+                if (isMediaPlaying) {
+                    Pair(true, "যাচাই সফল: মিডিয়া সক্রিয়ভাবে চলছে${mediaTitle?.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()}")
                 } else {
                     Pair(false, "যাচাই ব্যর্থ: কোনো চলমান মিডিয়া সেশন পাওয়া যায়নি")
                 }
@@ -70,7 +78,7 @@ object ActionVerifier {
 
             VerifyType.PLAYBACK_TITLE_CONTAINS -> {
                 val expected = spec.expected?.lowercase() ?: ""
-                if (!mediaTitle.isNullOrBlank() && mediaTitle.lowercase().contains(expected)) {
+                if (isMediaPlaying && !mediaTitle.isNullOrBlank() && mediaTitle.lowercase().contains(expected)) {
                     Pair(true, "যাচাই সফল: প্লেব্যাক শিরোনাম মিলছে ($mediaTitle)")
                 } else {
                     Pair(false, "যাচাই ব্যর্থ: প্লেব্যাক শিরোনামে '$expected' পাওয়া যায়নি (বর্তমান: $mediaTitle)")

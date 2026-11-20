@@ -44,6 +44,107 @@ class AssistantToolExecutor(
     }
     private val skillRecorder by lazy { com.example.automation.JarvisSkillRecorder() }
 
+    private fun readRealBatteryPercent(ctx: Context?): Int {
+        if (ctx == null) return -1
+        val bm = ctx.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+        val propLevel = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+        if (propLevel in 0..100) return propLevel
+        return try {
+            val intent = ctx.registerReceiver(null, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            if (level >= 0 && scale > 0) ((level * 100) / scale).coerceIn(0, 100) else -1
+        } catch (_: Exception) {
+            -1
+        }
+    }
+
+    internal fun parseScheduleTimestamp(
+        rawInput: String,
+        defaultMinutes: Long = 30L,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Long {
+        val ascii = rawInput.trim().map { ch ->
+            when (ch) {
+                '০' -> '0'
+                '১' -> '1'
+                '২' -> '2'
+                '৩' -> '3'
+                '৪' -> '4'
+                '৫' -> '5'
+                '৬' -> '6'
+                '৭' -> '7'
+                '৮' -> '8'
+                '৯' -> '9'
+                else -> ch
+            }
+        }.joinToString("")
+
+        if (ascii.isBlank()) {
+            return nowMillis + (defaultMinutes.coerceAtLeast(1L) * 60_000L)
+        }
+
+        // 12-hour clock format e.g. "08:00 AM", "8 AM", "9:30pm"
+        val amPmMatch = Regex("^(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)$", RegexOption.IGNORE_CASE).find(ascii)
+        if (amPmMatch != null) {
+            val rawHour = amPmMatch.groupValues[1].toIntOrNull()
+            val minute = amPmMatch.groupValues[2].toIntOrNull() ?: 0
+            val amPm = amPmMatch.groupValues[3].lowercase(Locale.ROOT)
+            if (rawHour != null && rawHour in 1..12 && minute in 0..59) {
+                val hour24 = when {
+                    amPm == "am" && rawHour == 12 -> 0
+                    amPm == "pm" && rawHour < 12 -> rawHour + 12
+                    else -> rawHour
+                }
+                val cal = java.util.Calendar.getInstance().apply {
+                    timeInMillis = nowMillis
+                    set(java.util.Calendar.HOUR_OF_DAY, hour24)
+                    set(java.util.Calendar.MINUTE, minute)
+                    set(java.util.Calendar.SECOND, 0)
+                    set(java.util.Calendar.MILLISECOND, 0)
+                    if (timeInMillis <= nowMillis) {
+                        add(java.util.Calendar.DAY_OF_YEAR, 1)
+                    }
+                }
+                return cal.timeInMillis
+            }
+        }
+
+        // 24-hour clock format e.g. "20:30", "08:15"
+        val militaryMatch = Regex("^(\\d{1,2}):(\\d{2})$").find(ascii)
+        if (militaryMatch != null) {
+            val hour = militaryMatch.groupValues[1].toIntOrNull()
+            val minute = militaryMatch.groupValues[2].toIntOrNull()
+            if (hour != null && hour in 0..23 && minute != null && minute in 0..59) {
+                val cal = java.util.Calendar.getInstance().apply {
+                    timeInMillis = nowMillis
+                    set(java.util.Calendar.HOUR_OF_DAY, hour)
+                    set(java.util.Calendar.MINUTE, minute)
+                    set(java.util.Calendar.SECOND, 0)
+                    set(java.util.Calendar.MILLISECOND, 0)
+                    if (timeInMillis <= nowMillis) {
+                        add(java.util.Calendar.DAY_OF_YEAR, 1)
+                    }
+                }
+                return cal.timeInMillis
+            }
+        }
+
+        // Relative duration e.g. "30", "15 minutes", "2 hours", "২ ঘণ্টা"
+        val firstNum = Regex("(\\d+)").find(ascii)?.groupValues?.getOrNull(1)?.toLongOrNull()
+        val minutes = if (firstNum != null && firstNum > 0L) {
+            val isHours = ascii.contains("hour", ignoreCase = true) ||
+                ascii.contains("hr", ignoreCase = true) ||
+                ascii.contains("ঘণ্টা") ||
+                ascii.contains("ঘন্টা")
+            if (isHours) firstNum * 60L else firstNum
+        } else {
+            defaultMinutes
+        }.coerceAtLeast(1L)
+
+        return nowMillis + (minutes * 60_000L)
+    }
+
     suspend fun getTopMemoriesForContext(): String {
         return try {
             val list = dao.getAllActiveMemoriesSync()
@@ -51,6 +152,16 @@ class AssistantToolExecutor(
             else list.take(15).joinToString("\n") { "- [${it.category}] ${it.key}: ${it.content}" }
         } catch (e: Exception) {
             ""
+        }
+    }
+
+    suspend fun getEnrichedContextForSession(userQuery: String = ""): String {
+        return try {
+            val memDao = context?.let { AssistantDatabase.getDatabase(it).jarvisMemoryDao() }
+            val repo = com.example.data.repository.JarvisMemoryRepository(dao, memDao)
+            repo.getEnrichedContextForAi(userQuery)
+        } catch (_: Exception) {
+            getTopMemoriesForContext()
         }
     }
 
@@ -73,6 +184,23 @@ class AssistantToolExecutor(
             caller = caller
         ) { toolName, toolArgs ->
             executeCore(toolName, toolArgs)
+        }
+    }
+
+    internal suspend fun executeCoreInternal(name: String, args: JSONObject): JSONObject =
+        withContext(Dispatchers.IO) { executeCore(name, args) }
+
+    private fun copyAutomationResult(res: JSONObject?, dst: JSONObject, fallbackBn: String) {
+        if (res == null) {
+            dst.put("success", false)
+            dst.put("error", "কনটেক্সট পাওয়া যায়নি")
+            dst.put("summaryBengali", "কনটেক্সট পাওয়া যায়নি")
+            return
+        }
+        res.keys().forEach { k -> dst.put(k, res.get(k)) }
+        if (!dst.has("summaryBengali") || dst.optString("summaryBengali").isBlank()) {
+            val bn = dst.optString("messageBn", fallbackBn).ifBlank { fallbackBn }
+            dst.put("summaryBengali", bn)
         }
     }
 
@@ -122,8 +250,7 @@ class AssistantToolExecutor(
                 }
 
                 "getBatteryLevel" -> {
-                    val bm = context?.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-                    val rawLevel = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+                    val rawLevel = readRealBatteryPercent(context)
                     if (rawLevel in 0..100) {
                         result.put("success", true)
                         result.put("batteryPercent", rawLevel)
@@ -258,10 +385,13 @@ class AssistantToolExecutor(
                     }
 
                     // 5. Battery and OS info
-                    val bm = context?.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-                    val batteryLevel = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
-                    val batteryStatus = if (batteryLevel >= 0) "$batteryLevel%" else "UNKNOWN"
+                    val batteryLevel = readRealBatteryPercent(context)
+                    val batteryStatus = if (batteryLevel in 0..100) "$batteryLevel%" else "UNKNOWN"
 
+                    result.put("success", dbOk)
+                    if (!dbOk) {
+                        result.put("status", "FAILED")
+                    }
                     result.put("database", dbHealth)
                     result.put("geminiApi", geminiHealth)
                     result.put("backgroundServices", servicesHealth)
@@ -313,6 +443,7 @@ class AssistantToolExecutor(
                         obj.put("content", n.content)
                         arr.put(obj)
                     }
+                    result.put("success", true)
                     result.put("count", notes.size)
                     result.put("notes", arr)
                     result.put("summaryBengali", "নোটপ্যাডে মোট ${notes.size}টি নোট রয়েছে।")
@@ -322,11 +453,13 @@ class AssistantToolExecutor(
                     val notes = dao.getAllNotesSync()
                     val latest = notes.firstOrNull()
                     if (latest != null) {
+                        result.put("success", true)
                         result.put("found", true)
                         result.put("title", latest.title)
                         result.put("content", latest.content)
                         result.put("summaryBengali", "সর্বশেষ নোট: '${latest.title}' — ${latest.content}")
                     } else {
+                        result.put("success", false)
                         result.put("found", false)
                         result.put("summaryBengali", "নোটপ্যাডে কোনো সংরক্ষিত নোট পাওয়া যায়নি।")
                     }
@@ -398,6 +531,7 @@ class AssistantToolExecutor(
                         obj.put("content", m.content)
                         arr.put(obj)
                     }
+                    result.put("success", true)
                     result.put("count", matches.size)
                     result.put("memories", arr)
                     result.put("summaryBengali", if (matches.isEmpty()) "'$query' সম্পর্কিত কোনো মেমোরি খুঁজে পাওয়া যায়নি।" else "মেমোরি থেকে ${matches.size}টি তথ্য পাওয়া গেছে।")
@@ -413,6 +547,7 @@ class AssistantToolExecutor(
                         obj.put("content", m.content)
                         arr.put(obj)
                     }
+                    result.put("success", true)
                     result.put("count", list.size)
                     result.put("memories", arr)
                     result.put("summaryBengali", "জারভিস মেমোরিতে মোট ${list.size}টি তথ্য সংরক্ষিত আছে।")
@@ -455,8 +590,7 @@ class AssistantToolExecutor(
                 "createAiTask" -> {
                     val title = args.optString("title", "").trim().ifBlank { "নতুন টাস্ক" }
                     val timeOrMinutes = args.optString("timeOrMinutesFromNow", "30").trim()
-                    val minutes = timeOrMinutes.filter { it.isDigit() }.toLongOrNull() ?: 30L
-                    val scheduledTime = System.currentTimeMillis() + (minutes * 60 * 1000L)
+                    val scheduledTime = parseScheduleTimestamp(timeOrMinutes, defaultMinutes = 30L)
                     val timeString = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(scheduledTime))
 
                     val task = AiTaskEntity(
@@ -481,14 +615,15 @@ class AssistantToolExecutor(
                     }
                     result.put("success", true)
                     result.put("taskId", id)
+                    result.put("scheduledTimeMillis", scheduledTime)
                     result.put("scheduledTime", timeString)
                     result.put("summaryBengali", "টাস্ক শিডিউল ও অ্যালার্ম সেট সম্পন্ন: '$title' ($timeString-এ অ্যালার্ট দেওয়া হবে)।")
                 }
 
                 "setExactScheduleAlarm" -> {
                     val title = args.optString("title", "ব্যক্তিগত শিডিউল অ্যালার্ম").trim().ifBlank { "ব্যক্তিগত শিডিউল অ্যালার্ম" }
-                    val minutes = args.optString("delayMinutes", "60").filter { it.isDigit() }.toLongOrNull() ?: 60L
-                    val scheduledTime = System.currentTimeMillis() + (minutes * 60 * 1000L)
+                    val delayRaw = args.optString("delayMinutes", "60").trim()
+                    val scheduledTime = parseScheduleTimestamp(delayRaw, defaultMinutes = 60L)
                     val timeString = SimpleDateFormat("dd MMM, hh:mm a", Locale.getDefault()).format(Date(scheduledTime))
 
                     val task = AiTaskEntity(
@@ -513,12 +648,19 @@ class AssistantToolExecutor(
                     }
                     result.put("success", true)
                     result.put("taskId", id)
+                    result.put("scheduledTimeMillis", scheduledTime)
                     result.put("scheduledTime", timeString)
                     result.put("summaryBengali", "সঠিক সময়ের অ্যালার্ম সেট করা হয়েছে: '$title' ($timeString-এ অ্যালার্ম বাজবে)।")
                 }
 
                 "getAllAiTasks" -> {
-                    val tasks = dao.getAllAiTasksSync()
+                    val statusFilter = args.optString("status", "ALL").trim().uppercase(Locale.ROOT)
+                    val allTasks = dao.getAllAiTasksSync()
+                    val tasks = when (statusFilter) {
+                        "PENDING" -> allTasks.filter { it.status.equals("PENDING", ignoreCase = true) && !it.isExecuted }
+                        "COMPLETED" -> allTasks.filter { it.status.equals("COMPLETED", ignoreCase = true) || it.isExecuted }
+                        else -> allTasks
+                    }
                     val arr = JSONArray()
                     tasks.forEach { t ->
                         val obj = JSONObject()
@@ -528,20 +670,33 @@ class AssistantToolExecutor(
                         obj.put("status", t.status)
                         arr.put(obj)
                     }
+                    result.put("success", true)
+                    result.put("statusFilter", statusFilter)
                     result.put("count", tasks.size)
                     result.put("tasks", arr)
-                    result.put("summaryBengali", "মোট ${tasks.size}টি শিডিউলড টাস্ক পাওয়া গেছে।")
+                    result.put("summaryBengali", "মোট ${tasks.size}টি শিডিউলড টাস্ক পাওয়া গেছে ($statusFilter)।")
                 }
 
                 "completeAiTask" -> {
                     val id = args.optLong("taskId", 0L)
                     if (id > 0L) {
-                        dao.markAiTaskCompleted(id)
-                        context?.let { ctx ->
-                            com.example.service.JarvisAlarmReceiver.cancelAlarm(ctx, id)
+                        val existing = dao.getAllAiTasksSync().firstOrNull { it.id == id }
+                        if (existing == null) {
+                            result.put("success", false)
+                            result.put("found", false)
+                            result.put("summaryBengali", "টাস্ক #$id ডাটাবেজে খুঁজে পাওয়া যায়নি।")
+                        } else {
+                            dao.markAiTaskCompleted(id)
+                            val updated = dao.getAllAiTasksSync().firstOrNull { it.id == id }
+                            val completedOk = updated?.isExecuted == true && updated.status.equals("COMPLETED", ignoreCase = true)
+                            if (completedOk) {
+                                context?.let { ctx ->
+                                    com.example.service.JarvisAlarmReceiver.cancelAlarm(ctx, id)
+                                }
+                            }
+                            result.put("success", completedOk)
+                            result.put("summaryBengali", if (completedOk) "টাস্ক #$id সম্পন্ন হিসেবে চিহ্নিত করা হয়েছে এবং অ্যালার্ম নিভিয়ে দেওয়া হয়েছে।" else "টাস্ক #$id সম্পন্ন হিসেবে আপডেট যাচাই করা যায়নি।")
                         }
-                        result.put("success", true)
-                        result.put("summaryBengali", "টাস্ক #$id সম্পন্ন হিসেবে চিহ্নিত করা হয়েছে এবং অ্যালার্ম নিভিয়ে দেওয়া হয়েছে।")
                     } else {
                         result.put("success", false)
                         result.put("summaryBengali", "সঠিক টাস্ক আইডি পাওয়া যায়নি।")
@@ -551,14 +706,27 @@ class AssistantToolExecutor(
                 "deleteAiTask" -> {
                     val id = args.optLong("taskId", 0L)
                     if (id > 0L) {
-                        dao.deleteAiTask(id)
-                        context?.let { ctx ->
-                            com.example.service.JarvisAlarmReceiver.cancelAlarm(ctx, id)
+                        val existing = dao.getAllAiTasksSync().firstOrNull { it.id == id }
+                        if (existing == null) {
+                            result.put("success", false)
+                            result.put("deleted", false)
+                            result.put("found", false)
+                            result.put("summaryBengali", "টাস্ক #$id ডাটাবেজে খুঁজে পাওয়া যায়নি।")
+                        } else {
+                            dao.deleteAiTask(id)
+                            val deletedOk = dao.getAllAiTasksSync().none { it.id == id }
+                            if (deletedOk) {
+                                context?.let { ctx ->
+                                    com.example.service.JarvisAlarmReceiver.cancelAlarm(ctx, id)
+                                }
+                            }
+                            result.put("success", deletedOk)
+                            result.put("deleted", deletedOk)
+                            result.put("summaryBengali", if (deletedOk) "টাস্ক #$id বাতিল/মুছে ফেলা হয়েছে এবং অ্যালার্ম প্রত্যাহার করা হয়েছে।" else "টাস্ক #$id মুছে ফেলা যাচাই করা যায়নি।")
                         }
-                        result.put("success", true)
-                        result.put("summaryBengali", "টাস্ক #$id বাতিল/মুছে ফেলা হয়েছে এবং অ্যালার্ম প্রত্যাহার করা হয়েছে।")
                     } else {
                         result.put("success", false)
+                        result.put("deleted", false)
                         result.put("summaryBengali", "সঠিক টাস্ক আইডি পাওয়া যায়নি।")
                     }
                 }
@@ -741,11 +909,12 @@ class AssistantToolExecutor(
                                 else if (clean.startsWith("01")) clean = "88" + clean
 
                                 if (clean.length < 7) {
-                                    val (ok, msg) = JarvisDeviceAutomationHelper.openAndControlWhatsApp(context, target, "")
-                                    result.put("success", ok)
+                                    val waRes = JarvisDeviceAutomationHelper.openAndControlWhatsAppDetailed(context, target, "")
+                                    result.put("success", waRes.success)
                                     result.put("actionStatus", "WHATSAPP_CHAT_OPENED_CALL_REQUESTED")
                                     result.put("verified", false)
-                                    result.put("summaryBengali", if (ok) "$target এর হোয়াটসঅ্যাপ চ্যাট খোলা হচ্ছে (নম্বর না থাকায় কল বাটন ম্যানুয়ালি বা অ্যাক্সেসিবিলিটি দিয়ে সম্পন্ন করতে হবে)।" else msg)
+                                    result.put("callState", com.example.automation.WhatsAppCallState.IDLE.name)
+                                    result.put("summaryBengali", if (waRes.success) "$target এর হোয়াটসঅ্যাপ চ্যাট খোলা হয়েছে (নম্বর না থাকায় কল বাটন ম্যানুয়ালি বা অ্যাক্সেসিবিলিটি দিয়ে সম্পন্ন করতে হবে)।" else waRes.summaryBengali)
                                 } else {
                                     try {
                                         val url = "https://wa.me/$clean"
@@ -755,20 +924,38 @@ class AssistantToolExecutor(
                                         }
                                         context.startActivity(intent)
 
+                                        var callState = com.example.automation.WhatsAppCallState.IDLE.name
+                                        var callVerified = false
                                         val service = JarvisAccessibilityService.instance
                                         if (service != null) {
-                                            CoroutineScope(Dispatchers.Main).launch {
-                                                delay(2000)
-                                                val buttonLabel = if (isVideo) "Video call" else "Voice call"
-                                                service.clickElementByText(buttonLabel)
-                                            }
+                                            delay(1200)
+                                            val buttonLabel = if (isVideo) "Video call" else "Voice call"
+                                            service.clickElementByTextAwait(buttonLabel)
+                                            delay(400)
+                                            val stateCheck = automationHandler?.verifyWhatsAppCallState()
+                                            callState = stateCheck?.optString("callState", com.example.automation.WhatsAppCallState.UNKNOWN.name)
+                                                ?: com.example.automation.WhatsAppCallState.UNKNOWN.name
+                                            callVerified = callState in setOf(
+                                                com.example.automation.WhatsAppCallState.INITIATING.name,
+                                                com.example.automation.WhatsAppCallState.RINGING.name,
+                                                com.example.automation.WhatsAppCallState.CONNECTING.name,
+                                                com.example.automation.WhatsAppCallState.CONNECTED.name
+                                            )
                                         }
 
                                         val callTypeBn = if (isVideo) "ভিডিও" else "ভয়েস"
                                         result.put("success", true)
-                                        result.put("actionStatus", "WHATSAPP_CHAT_OPENED_CALL_REQUESTED")
-                                        result.put("verified", false)
-                                        result.put("summaryBengali", "$target ($clean) এর সাথে হোয়াটসঅ্যাপ $callTypeBn কল অনুরোধ পাঠানো হয়েছে।")
+                                        result.put("actionStatus", if (callVerified) "CALL_ACTIVE" else "WHATSAPP_CHAT_OPENED_CALL_REQUESTED")
+                                        result.put("callState", callState)
+                                        result.put("verified", callVerified)
+                                        result.put(
+                                            "summaryBengali",
+                                            if (callVerified) {
+                                                "$target ($clean)-এর সাথে হোয়াটসঅ্যাপ $callTypeBn কল শুরু হয়েছে (অবস্থা: $callState)।"
+                                            } else {
+                                                "$target ($clean) এর সাথে হোয়াটসঅ্যাপ $callTypeBn কল চ্যাট/অনুরোধ পাঠানো হয়েছে (কল অবস্থা: $callState)।"
+                                            }
+                                        )
                                     } catch (e: Exception) {
                                         result.put("success", false)
                                         result.put("summaryBengali", "হোয়াটসঅ্যাপ কল শুরু করা যায়নি: ${e.message}")
@@ -847,13 +1034,18 @@ class AssistantToolExecutor(
                     result.put("success", weather.isLiveData)
                     result.put("isLiveData", weather.isLiveData)
                     result.put("source", weather.source)
+                    result.put("lastUpdatedMillis", weather.lastUpdatedMillis)
                     if (!weather.isLiveData) {
-                        result.put("status", "OFFLINE_LIMITED")
+                        val err = weather.errorCode ?: "OFFLINE_LIMITED"
+                        result.put("status", if (err == "LOCATION_NOT_FOUND") "FAILED" else "OFFLINE_LIMITED")
+                        result.put("errorCode", err)
                     }
                     result.put("location", weather.locationName)
                     result.put("temperature", weather.temperatureC)
                     result.put("condition", weather.conditionBengali)
                     result.put("humidity", weather.humidityPercent)
+                    result.put("hourlyForecast", JSONArray(weather.hourlySummary))
+                    result.put("dailyForecast", JSONArray(weather.dailyForecast))
                     result.put("summaryBengali", weather.fullSummaryBengali)
                 }
 
@@ -875,6 +1067,11 @@ class AssistantToolExecutor(
                                 result.put("longitude", liveLoc.longitude)
                                 result.put("accuracy", liveLoc.accuracy.toDouble())
                                 result.put("address", liveLoc.fullAddress)
+                                result.put("isCached", liveLoc.isCached)
+                                result.put("isFresh", !liveLoc.isCached)
+                                result.put("timestamp", liveLoc.timestamp)
+                                val ageMinutes = if (liveLoc.timestamp > 0L) ((System.currentTimeMillis() - liveLoc.timestamp).coerceAtLeast(0L) / 60_000L) else 0L
+                                result.put("ageMinutes", ageMinutes)
                                 result.put("summaryBengali", com.example.util.JarvisLiveLocationTracker.formatLocationSpokenSummary(liveLoc))
                             } else {
                                 result.put("success", false)
@@ -891,11 +1088,13 @@ class AssistantToolExecutor(
                     val query = args.optString("query", "").trim()
                     val wiki = if (query.isNotBlank()) NewsAndRegulatoryService.searchWikipedia(query) else null
                     if (wiki != null && wiki.found) {
+                        result.put("success", true)
                         result.put("found", true)
                         result.put("title", wiki.title)
                         result.put("extract", wiki.extract)
                         result.put("summaryBengali", "উইকিপিডিয়া ফলাফল ('${wiki.title}'):\n${wiki.extract}")
                     } else {
+                        result.put("success", false)
                         result.put("found", false)
                         result.put("summaryBengali", "'$query' সম্পর্কিত কোনো উইকিপিডিয়া নিবন্ধ পাওয়া যায়নি।")
                     }
@@ -927,13 +1126,55 @@ class AssistantToolExecutor(
 
                 "searchExternalKnowledge" -> {
                     val q = (args.optString("query", "").ifBlank { args.optString("topic", "") }).trim()
-                    val wiki = if (q.isNotBlank()) NewsAndRegulatoryService.searchWikipedia(q) else null
-                    if (wiki != null && wiki.found) {
-                        result.put("found", true)
-                        result.put("summaryBengali", "সার্চ ফলাফল ('${wiki.title}'):\n${wiki.extract}")
+                    val directUrl = args.optString("url", "").trim().ifBlank {
+                        if (q.startsWith("http://", true) || q.startsWith("https://", true)) q else ""
+                    }
+                    if (directUrl.isNotBlank()) {
+                        val page = com.example.research.WebPageContentExtractor.extractPageContent(directUrl)
+                        val isExtracted = page.status == com.example.research.ExtractionStatus.EXTRACTED && page.cleanText.isNotBlank()
+                        result.put("success", isExtracted)
+                        result.put("found", isExtracted)
+                        result.put("contentMode", if (isExtracted) "FULL_PAGE_EXTRACTED" else "EXTRACTION_FAILED")
+                        result.put("url", page.url)
+                        result.put("extractionStatus", page.status.name)
+                        result.put("httpStatusCode", page.httpStatusCode)
+                        result.put("title", page.title)
+                        result.put("content", if (isExtracted) com.example.research.UniversalBrowserAgent.wrapUntrustedExternalContent(page.url, page.cleanText) else "")
+                        if (!isExtracted) {
+                            result.put("errorCode", page.status.name)
+                        }
+                        result.put("summaryBengali", if (isExtracted) "${page.summaryBengali}\n\n${page.cleanText.take(600)}" else page.summaryBengali)
                     } else {
-                        result.put("found", false)
-                        result.put("summaryBengali", "বিষয়: '$q'। জারভিস নিউরাল কোর থেকে অনুসন্ধান সম্পন্ন।")
+                        val kr = com.example.knowledge.IntelligentKnowledgeRouter.query(
+                            query = q,
+                            context = context,
+                            modeOverride = com.example.knowledge.RetrievalMode.FAST_RETRIEVAL,
+                            knowledgeDaoOverride = context?.let { AssistantDatabase.getDatabase(it).knowledgeDao() }
+                        )
+                        val sourcesArr = JSONArray()
+                        kr.citations.forEach { item ->
+                            sourcesArr.put(JSONObject().apply {
+                                put("title", item.title)
+                                put("url", item.url)
+                                put("canonicalUrl", item.canonicalUrl)
+                                put("domain", item.domain)
+                                put("snippet", item.snippet)
+                                put("publishedDate", item.publishedDate)
+                                put("snippetOnly", !item.contentExtracted)
+                                put("contentExtracted", item.contentExtracted)
+                            })
+                        }
+                        result.put("success", !kr.offlineFallback && kr.citations.isNotEmpty())
+                        result.put("found", kr.citations.isNotEmpty())
+                        result.put("contentMode", if (kr.citations.any { it.contentExtracted }) "FULL_PAGE_EXTRACTED" else "SNIPPET_ONLY")
+                        result.put("cacheTier", kr.cacheTierReached.name)
+                        result.put("verificationStatus", kr.verificationStatus.name)
+                        result.put("storageState", kr.storageState.name)
+                        result.put("firstResponseMs", kr.firstResponseMs)
+                        result.put("totalLatencyMs", kr.totalLatencyMs)
+                        result.put("status", if (kr.offlineFallback) "OFFLINE_LIMITED" else if (kr.citations.isNotEmpty()) "VERIFIED" else "NO_RESULTS")
+                        result.put("sources", sourcesArr)
+                        result.put("summaryBengali", kr.summaryBengali)
                     }
                 }
 
@@ -989,23 +1230,54 @@ class AssistantToolExecutor(
                     val notifs = (liveNotifs + dbNotifs).distinctBy { it.key }.sortedByDescending { it.timestamp }
                     result.put("success", true)
                     result.put("count", notifs.size)
-                    result.put("summaryBengali", if (notifs.isNotEmpty()) {
-                        "$app-এর ${notifs.size}টি নোটিফিকেশন পাওয়া গেছে:\n" + notifs.joinToString("\n") { "• ${it.sender}: ${if (it.isSensitiveOtp) "[ওটিপি সুরক্ষিত]" else it.text}" }
+                    val arr = JSONArray()
+                    notifs.forEach { n ->
+                        val safeBody = com.example.data.repository.JarvisNotificationRepository.formatSafeNotificationText(n)
+                        arr.put(JSONObject().apply {
+                            put("appName", n.appName)
+                            put("sender", n.sender)
+                            put("text", safeBody)
+                            put("isSensitiveOtp", n.isSensitiveOtp)
+                        })
+                    }
+                    result.put("notifications", arr)
+                    if (context != null && (app.contains("youtube", ignoreCase = true) || app.contains("ইউটিউব"))) {
+                        val ytSplit = com.example.service.JarvisNotificationListenerService.getYouTubeNotificationSplit(context)
+                        result.put("systemPushCount", ytSplit.systemPushNotifications.size)
+                        result.put("activeVideoTitle", ytSplit.activeVideoTitle)
+                        result.put("isMediaPlaying", ytSplit.isMediaPlaying)
+                        result.put("inAppInboxHonestNote", ytSplit.inAppInboxHonestNote)
+                        result.put("summaryBengali", ytSplit.summaryBengali)
                     } else {
-                        "$app অ্যাপের কোনো নতুন নোটিফিকেশন পাওয়া যায়নি, স্যার।"
-                    })
+                        result.put("summaryBengali", if (notifs.isNotEmpty()) {
+                            "$app-এর ${notifs.size}টি নোটিফিকেশন পাওয়া গেছে:\n" + notifs.joinToString("\n") { "• ${it.sender}: ${if (it.isSensitiveOtp) "[ওটিপি সুরক্ষিত]" else it.text}" }
+                        } else {
+                            "$app অ্যাপের কোনো নতুন নোটিফিকেশন পাওয়া যায়নি, স্যার।"
+                        })
+                    }
                 }
 
                 "getNotificationDetails" -> {
                     val app = args.optString("appName", "").trim()
-                    val liveNotif = com.example.service.JarvisNotificationListenerService.getLatestNotification(app.ifBlank { null })
-                    val notif = liveNotif ?: if (context != null) {
-                        if (app.isNotBlank()) {
-                            com.example.data.repository.JarvisNotificationRepository.getNotificationsByAppFromDb(context, app, 1).firstOrNull()
-                        } else {
-                            com.example.data.repository.JarvisNotificationRepository.getRecentFromDb(context, 1).firstOrNull()
+                    val senderFilter = args.optString("sender", "").trim()
+                    val liveNotifs = com.example.service.JarvisNotificationListenerService.getActiveNotificationsList()
+                    val dbNotifs = if (context != null) {
+                        when {
+                            app.isNotBlank() -> com.example.data.repository.JarvisNotificationRepository.getNotificationsByAppFromDb(context, app, 30)
+                            senderFilter.isNotBlank() -> com.example.data.repository.JarvisNotificationRepository.getNotificationsBySenderFromDb(context, senderFilter, 30)
+                            else -> com.example.data.repository.JarvisNotificationRepository.getRecentFromDb(context, 30)
                         }
-                    } else null
+                    } else emptyList()
+                    val combined = (liveNotifs + dbNotifs).distinctBy { it.key }.sortedByDescending { it.timestamp }
+                    val notif = combined.firstOrNull { item ->
+                        val appMatch = app.isBlank() ||
+                            item.appName.contains(app, ignoreCase = true) ||
+                            item.packageName.contains(app, ignoreCase = true)
+                        val senderMatch = senderFilter.isBlank() ||
+                            item.sender.contains(senderFilter, ignoreCase = true) ||
+                            item.title.contains(senderFilter, ignoreCase = true)
+                        appMatch && senderMatch
+                    }
                     if (notif != null) {
                         val content = com.example.data.repository.JarvisNotificationRepository.formatSafeNotificationText(notif)
                         result.put("success", true)
@@ -1203,10 +1475,13 @@ class AssistantToolExecutor(
                 }
 
                 "stopCameraVision" -> {
+                    JarvisCameraVisionCoordinator.stopVisionStream()
+                    com.example.util.JarvisCameraManager.activeCameraControl = null
+                    com.example.util.JarvisCameraManager.activeImageCapture = null
                     JarvisHudEventBus.emitToggleInlineCamera(false)
                     onNavigate("hud")
                     result.put("success", true)
-                    result.put("summaryBengali", "ক্যামেরা ভিশন বন্ধ করা হয়েছে।")
+                    result.put("summaryBengali", "ক্যামেরা ভিশন ও লাইভ স্ট্রিম বন্ধ করা হয়েছে।")
                 }
 
                 "captureCameraFrame" -> {
@@ -1309,14 +1584,14 @@ class AssistantToolExecutor(
 
                 "clickUiElement" -> {
                     val q = args.optString("query", "").trim()
-                    val (ok, msg) = JarvisDeviceAutomationHelper.clickElementOnScreen(q, 0f, 0f)
+                    val (ok, msg) = JarvisDeviceAutomationHelper.clickElementOnScreenAwait(q, 0f, 0f)
                     result.put("success", ok)
                     result.put("summaryBengali", msg)
                 }
 
                 "longPressUiElement" -> {
                     val q = args.optString("query", "").trim()
-                    val (ok, msg) = JarvisDeviceAutomationHelper.longPressElement(q, 0f, 0f)
+                    val (ok, msg) = JarvisDeviceAutomationHelper.longPressElementAwait(q, 0f, 0f)
                     result.put("success", ok)
                     result.put("summaryBengali", msg)
                 }
@@ -1329,7 +1604,7 @@ class AssistantToolExecutor(
                         "UP", "উপরে", "SWIPE_UP" -> "swipe_up"
                         else -> "swipe_down"
                     }
-                    val (ok, msg) = JarvisDeviceAutomationHelper.performSwipe(act)
+                    val (ok, msg) = JarvisDeviceAutomationHelper.performSwipeAwait(act)
                     result.put("success", ok)
                     result.put("direction", dir)
                     result.put("summaryBengali", msg)
@@ -1363,39 +1638,58 @@ class AssistantToolExecutor(
                 // 14. SOCIAL & MESSAGING AUTOMATION
                 // -------------------------------------------------------------
                 "readFacebookFeed", "readFacebookPost" -> {
-                    if (context == null || JarvisAccessibilityService.instance == null) {
+                    if (context == null) {
                         result.put("success", false)
-                        result.put("summaryBengali", "ফেসবুক স্ক্রিন পড়ার জন্য অ্যাক্সেসিবিলিটি সার্ভিস সক্রিয় থাকা প্রয়োজন।")
+                        result.put("summaryBengali", "কনটেক্সট অনুপস্থিত থাকায় ফেসবুক ফিড পড়া যায়নি।")
                     } else {
-                        val sc = ScreenPerceptionEngine.inspectCurrentScreen(context, sanitize = true)
-                        val isFacebookFg = sc.foregroundPackage.contains("facebook", ignoreCase = true)
-                        if (isFacebookFg && sc.visibleTexts.isNotEmpty()) {
-                            result.put("success", true)
-                            result.put("foregroundPackage", sc.foregroundPackage)
-                            result.put("summaryBengali", "দৃশ্যমান ফেসবুক কন্টেন্ট:\n" + sc.visibleTexts.take(8).joinToString("\n• "))
-                        } else {
-                            result.put("success", false)
-                            result.put("foregroundPackage", sc.foregroundPackage)
-                            result.put("summaryBengali", "বর্তমানে স্ক্রিনে ফেসবুক খোলা নেই (বর্তমান অ্যাপ: ${sc.foregroundPackage})। প্রথমে ফেসবুক ওপেন করুন।")
-                        }
+                        val feedRes = JarvisDeviceAutomationHelper.readStructuredFacebookFeed(context)
+                        feedRes.keys().forEach { k -> result.put(k, feedRes.get(k)) }
                     }
                 }
 
                 "reactToCurrentPost" -> {
-                    val (ok, msg) = JarvisDeviceAutomationHelper.clickElementOnScreen("Like", 0f, 0f)
-                    result.put("success", ok)
-                    result.put("summaryBengali", if (ok) "পোস্টে লাইক বাটনে ক্লিক করা হয়েছে।" else msg)
+                    if (context == null) {
+                        result.put("success", false)
+                        result.put("verified", false)
+                        result.put("summaryBengali", "কনটেক্সট অনুপস্থিত।")
+                    } else {
+                        val (ok, verified, msg) = JarvisDeviceAutomationHelper.reactToFacebookPost(context)
+                        result.put("success", ok)
+                        result.put("verified", verified)
+                        result.put("summaryBengali", msg)
+                        if (!ok && JarvisAccessibilityService.instance == null) {
+                            result.put("permissionRequired", "accessibility")
+                        }
+                    }
+                }
+
+                "commentOnFacebookPost" -> {
+                    val commentText = (args.optString("text", "").ifBlank { args.optString("comment", "") }).trim()
+                    if (context == null) {
+                        result.put("success", false)
+                        result.put("verified", false)
+                        result.put("summaryBengali", "কনটেক্সট অনুপস্থিত।")
+                    } else {
+                        val (ok, verified, msg) = JarvisDeviceAutomationHelper.commentOnFacebookPost(context, commentText)
+                        result.put("success", ok)
+                        result.put("verified", verified)
+                        result.put("summaryBengali", msg)
+                        if (!ok && JarvisAccessibilityService.instance == null) {
+                            result.put("permissionRequired", "accessibility")
+                        }
+                    }
                 }
 
                 "createFacebookPostDraft" -> {
                     val text = args.optString("text", "").trim()
-                    if (context != null && text.isNotBlank()) {
-                        val (ok, msg) = JarvisDeviceAutomationHelper.openFacebook(context, text)
+                    val mediaUri = args.optString("mediaUri", "").trim().ifBlank { null }
+                    if (context != null && (text.isNotBlank() || mediaUri != null)) {
+                        val (ok, msg) = JarvisDeviceAutomationHelper.openFacebookMediaPostDraft(context, text, mediaUri)
                         result.put("success", ok)
                         result.put("summaryBengali", msg)
                     } else {
                         result.put("success", false)
-                        result.put("summaryBengali", "ফেসবুক পোস্টের জন্য টেক্সট প্রদান করুন।")
+                        result.put("summaryBengali", "ফেসবুক পোস্টের জন্য টেক্সট বা ছবি URI প্রদান করুন।")
                     }
                 }
 
@@ -1406,7 +1700,9 @@ class AssistantToolExecutor(
                         if (resolved.needsDisambiguation && resolved.matches.size > 1) {
                             result.put("success", false)
                             result.put("status", "MULTIPLE_MATCHES")
+                            result.put("actionStatus", "MULTIPLE_MATCHES")
                             result.put("needsDisambiguation", true)
+                            result.put("candidates", JSONArray(resolved.matches.map { "${it.name} (${it.primaryPhoneNumber})" }))
                             result.put("summaryBengali", resolved.summaryBengali)
                         } else {
                             val resolvedTarget = if (resolved.matches.isNotEmpty()) resolved.matches.first().primaryPhoneNumber else target
@@ -1482,8 +1778,7 @@ class AssistantToolExecutor(
                 }
 
                 "getDeviceState", "getBatteryHealthInfo" -> {
-                    val bm = context?.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
-                    val bat = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+                    val bat = readRealBatteryPercent(context)
                     if (bat in 0..100) {
                         result.put("success", true)
                         result.put("batteryPercent", bat)
@@ -1616,11 +1911,16 @@ class AssistantToolExecutor(
             "searchAndPlayYouTube" -> {
                 val q = (args.optString("query", "").ifBlank { args.optString("searchQuery", "") }).trim()
                 if (context != null && q.isNotBlank()) {
-                    val (ok, msg) = JarvisDeviceAutomationHelper.searchAndPlayYouTube(context, q)
-                    result.put("success", ok)
-                    result.put("summaryBengali", msg)
+                    val ytRes = JarvisDeviceAutomationHelper.searchAndPlayYouTubeDetailed(context, q)
+                    result.put("success", ytRes.success)
+                    result.put("verified", ytRes.playbackVerified)
+                    result.put("actionStatus", ytRes.actionStatus)
+                    ytRes.activeTitle?.let { result.put("activeTitle", it) }
+                    result.put("summaryBengali", ytRes.summaryBengali)
                 } else {
                     result.put("success", false)
+                    result.put("verified", false)
+                    result.put("actionStatus", "INVALID_INPUT")
                     result.put("summaryBengali", "ইউটিউবে কি সার্চ করতে হবে তা উল্লেখ করুন।")
                 }
             }
@@ -1629,11 +1929,16 @@ class AssistantToolExecutor(
                 val contact = (args.optString("contact", "").ifBlank { args.optString("contactName", "") }).trim()
                 val msgText = (args.optString("message", "").ifBlank { args.optString("messageText", "") }).trim()
                 if (context != null) {
-                    val (ok, msg) = JarvisDeviceAutomationHelper.openAndControlWhatsApp(context, contact, msgText)
-                    result.put("success", ok)
-                    result.put("verified", false)
-                    result.put("actionStatus", if (ok) "COMPOSER_OPENED_READY_TO_SEND" else "FAILED")
-                    result.put("summaryBengali", msg)
+                    val waRes = JarvisDeviceAutomationHelper.openAndControlWhatsAppDetailed(context, contact, msgText)
+                    result.put("success", waRes.success)
+                    result.put("verified", waRes.verified)
+                    result.put("actionStatus", waRes.actionStatus)
+                    result.put("deliveryState", waRes.deliveryState)
+                    result.put("needsDisambiguation", waRes.actionStatus == "MULTIPLE_MATCHES")
+                    if (waRes.candidates.isNotEmpty()) {
+                        result.put("candidates", JSONArray(waRes.candidates))
+                    }
+                    result.put("summaryBengali", waRes.summaryBengali)
                 } else {
                     result.put("success", false)
                     result.put("verified", false)
@@ -1678,7 +1983,7 @@ class AssistantToolExecutor(
                 val target = args.optString("targetText", "").trim()
                 val x = args.optString("x", "0").toFloatOrNull() ?: 0f
                 val y = args.optString("y", "0").toFloatOrNull() ?: 0f
-                val (ok, msg) = JarvisDeviceAutomationHelper.clickElementOnScreen(target, x, y)
+                val (ok, msg) = JarvisDeviceAutomationHelper.clickElementOnScreenAwait(target, x, y)
                 result.put("success", ok)
                 result.put("summaryBengali", msg)
             }
@@ -1687,7 +1992,7 @@ class AssistantToolExecutor(
                 val target = args.optString("targetText", "").trim()
                 val x = args.optString("x", "0").toFloatOrNull() ?: 0f
                 val y = args.optString("y", "0").toFloatOrNull() ?: 0f
-                val (ok, msg) = JarvisDeviceAutomationHelper.longPressElement(target, x, y)
+                val (ok, msg) = JarvisDeviceAutomationHelper.longPressElementAwait(target, x, y)
                 result.put("success", ok)
                 result.put("summaryBengali", msg)
             }
@@ -1820,28 +2125,88 @@ class AssistantToolExecutor(
                 if (context != null) {
                     val apiKey = AiSettingsRepository(context).settingsState.value.apiKey
                     val (screenContext, visualAnalysis) = ScreenPerceptionEngine.perceiveScreen(context, apiKey, question)
+                    if (visualAnalysis != null) {
+                        JarvisMasterOrchestrator.recordVisionAnalysisContext(visualAnalysis)
+                    }
                     result.put("success", screenContext.accessibilityAvailable || visualAnalysis != null)
                     result.put("detectedApp", visualAnalysis?.detectedApp ?: screenContext.foregroundPackage)
                     result.put("screenDescription", visualAnalysis?.screenDescription ?: screenContext.summaryBengali)
                     result.put("summaryBengali", visualAnalysis?.summaryBengali ?: screenContext.summaryBengali)
                     result.put("browserUrl", screenContext.currentBrowserUrl ?: "")
                     result.put("settingsSection", screenContext.settingsSection ?: "")
+                    result.put("frameWidth", visualAnalysis?.frameWidth ?: 0)
+                    result.put("frameHeight", visualAnalysis?.frameHeight ?: 0)
+                    val sugArr = JSONArray()
+                    visualAnalysis?.suggestions?.forEach { sug ->
+                        sugArr.put(JSONObject().apply {
+                            put("actionType", sug.actionType)
+                            put("title", sug.title)
+                            put("description", sug.description)
+                            sug.targetTextOrId?.let { put("targetTextOrId", it) }
+                            sug.viewId?.let { put("viewId", it) }
+                            sug.elementName?.let { put("elementName", it) }
+                            put("elementType", sug.elementType)
+                            put("clickable", sug.clickable)
+                            sug.inputPayload?.let { put("inputPayload", it) }
+                            put("boundsLeft", sug.boundsLeft)
+                            put("boundsTop", sug.boundsTop)
+                            put("boundsRight", sug.boundsRight)
+                            put("boundsBottom", sug.boundsBottom)
+                            sug.centerNormX?.let { put("centerNormX", it.toDouble()) }
+                            sug.centerNormY?.let { put("centerNormY", it.toDouble()) }
+                            put("confidence", sug.confidence.toDouble())
+                            put("screenshotTimestamp", sug.screenshotTimestamp)
+                            put("screenshotWidth", sug.screenshotWidth)
+                            put("screenshotHeight", sug.screenshotHeight)
+                        })
+                    }
+                    result.put("suggestions", sugArr)
                 } else {
                     result.put("success", false)
                     result.put("summaryBengali", "কনটেক্সট পাওয়া যায়নি।")
                 }
             }
 
+            "executeVisualSuggestion" -> {
+                if (context == null) {
+                    result.put("success", false)
+                    result.put("summaryBengali", "কনটেক্সট অনুপস্থিত থাকায় ভিজ্যুয়াল অ্যাকশন চালানো যায়নি।")
+                } else {
+                    val suggestion = ScreenActionSuggestion(
+                        actionType = args.optString("actionType", "click").trim().ifBlank { "click" },
+                        title = args.optString("title", args.optString("targetTextOrId", "Visual Target")).trim(),
+                        description = args.optString("description", "").trim(),
+                        targetTextOrId = args.optString("targetTextOrId", "").trim().ifBlank { null },
+                        viewId = args.optString("viewId", "").trim().ifBlank { null },
+                        elementName = args.optString("elementName", "").trim().ifBlank { null },
+                        elementType = args.optString("elementType", "Button").trim(),
+                        clickable = args.optBoolean("clickable", true),
+                        inputPayload = args.optString("inputPayload", "").trim().ifBlank { null },
+                        centerNormX = if (args.has("xNorm")) args.optDouble("xNorm").toFloat() else null,
+                        centerNormY = if (args.has("yNorm")) args.optDouble("yNorm").toFloat() else null,
+                        confidence = args.optDouble("confidence", 0.8).toFloat(),
+                        screenshotTimestamp = args.optLong("screenshotTimestamp", System.currentTimeMillis()),
+                        screenshotWidth = args.optInt("frameWidth", 0),
+                        screenshotHeight = args.optInt("frameHeight", 0)
+                    )
+                    val outcome = ScreenVisualAnalyzer.executeVisualSuggestion(context, suggestion)
+                    result.put("success", outcome.success)
+                    result.put("status", outcome.status)
+                    result.put("verified", outcome.verified)
+                    result.put("strategyUsed", outcome.strategyUsed)
+                    result.put("screenChanged", outcome.screenChanged)
+                    result.put("summaryBengali", outcome.summaryBengali)
+                }
+            }
+
             "runPlaybook" -> {
                 val pId = args.optString("playbookId", "").trim()
-                val res = automationHandler?.runPlaybook(pId, args) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.runPlaybook(pId, args), result, "প্লেবুক চালানো হয়েছে।")
             }
 
             "listPlaybooks" -> {
                 val pkg = args.optString("appPackage", "").trim()
-                val res = automationHandler?.listPlaybooks(pkg.ifBlank { null }) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.listPlaybooks(pkg.ifBlank { null }), result, "প্লেবুক তালিকা।")
             }
 
             "recordPlaybook" -> {
@@ -1858,88 +2223,81 @@ class AssistantToolExecutor(
                         verify = com.example.automation.VerifySpec(type = com.example.automation.VerifyType.SCREEN_HASH_CHANGED)
                     )
                     com.example.automation.PlaybookStore.registerPlaybook(playbook)
+                    val msg = "নতুন প্লেবুক '$id' রেকর্ড করা হয়েছে।"
                     result.put("success", true)
-                    result.put("messageBn", "নতুন প্লেবুক '$id' রেকর্ড করা হয়েছে।")
+                    result.put("messageBn", msg)
+                    result.put("summaryBengali", msg)
                 } else {
+                    val msg = "প্লেবুক আইডি বা অ্যাপ প্যাকেজ দেওয়া হয়নি।"
                     result.put("success", false)
-                    result.put("messageBn", "প্লেবুক আইডি বা অ্যাপ প্যাকেজ দেওয়া হয়নি।")
+                    result.put("messageBn", msg)
+                    result.put("summaryBengali", msg)
                 }
             }
 
             "validatePlaybook" -> {
                 val pId = args.optString("playbookId", "").trim()
-                val res = automationHandler?.validatePlaybook(pId) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.validatePlaybook(pId), result, "প্লেবুক যাচাই করা হয়েছে।")
             }
 
             "getAppVersion" -> {
                 val pkg = args.optString("appPackage", "").trim()
-                val res = automationHandler?.getAppVersion(pkg) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.getAppVersion(pkg), result, "অ্যাপ সংস্করণ তথ্য।")
             }
 
             "waitForNode" -> {
                 val query = (args.optString("selectorQuery", "").ifBlank { args.optString("query", "") }).trim()
                 val by = args.optString("by", "TEXT").trim()
                 val timeout = args.optLong("timeoutMs", 4000L)
-                val res = automationHandler?.waitForNode(query, by, timeout) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.waitForNode(query, by, timeout), result, "নোড অপেক্ষা সম্পন্ন।")
             }
 
             "assertScreen" -> {
                 val pkg = args.optString("expectedPackage", "").trim()
                 val text = args.optString("expectedText", "").trim()
-                val res = automationHandler?.assertScreen(pkg, text) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.assertScreen(pkg, text), result, "স্ক্রিন যাচাই।")
             }
 
             "readVisibleList" -> {
-                val res = automationHandler?.readVisibleList() ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.readVisibleList(), result, "দৃশ্যমান তালিকা।")
             }
 
             "scrollToText" -> {
                 val text = (args.optString("targetText", "").ifBlank { args.optString("text", "") }).trim()
                 val dir = args.optString("direction", "DOWN").trim()
                 val maxSwipes = args.optInt("maxSwipes", 6)
-                val res = automationHandler?.scrollToText(text, dir, maxSwipes) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.scrollToText(text, dir, maxSwipes), result, "স্ক্রল সম্পন্ন।")
             }
 
             "openDeepLink" -> {
                 val uri = (args.optString("uri", "").ifBlank { args.optString("link", "") }).trim()
                 val pkg = args.optString("appPackage", "").trim()
-                val res = automationHandler?.openDeepLink(uri, pkg) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.openDeepLink(uri, pkg), result, "ডিপ লিংক অ্যাকশন।")
             }
 
             "mediaControl" -> {
                 val action = (args.optString("action", "").ifBlank { args.optString("command", "") }).trim()
                 val seekMs = if (args.has("seekMs")) args.optLong("seekMs") else null
-                val res = automationHandler?.mediaControl(action, seekMs) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.mediaControl(action, seekMs), result, "মিডিয়া কমান্ড।")
             }
 
             "replyFromNotification" -> {
                 val pkg = args.optString("packageFilter", "com.whatsapp").trim()
                 val sender = args.optString("sender", "").trim().ifBlank { null }
                 val text = (args.optString("replyText", "").ifBlank { args.optString("text", "") }).trim()
-                val res = automationHandler?.replyFromNotification(pkg, sender, text) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.replyFromNotification(pkg, sender, text), result, "নোটিফিকেশন রিপ্লাই।")
             }
 
             "shareViaIntent" -> {
                 val pkg = args.optString("targetPackage", "").trim()
                 val text = (args.optString("text", "").ifBlank { args.optString("content", "") }).trim()
                 val mime = args.optString("mimeType", "text/plain").trim()
-                val res = automationHandler?.shareViaIntent(pkg, text, mime) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.shareViaIntent(pkg, text, mime), result, "শেয়ার ইনটেন্ট।")
             }
 
             "getPlaybookHealth" -> {
                 val pId = args.optString("playbookId", "").trim().ifBlank { null }
-                val res = automationHandler?.getPlaybookHealth(pId) ?: JSONObject().put("error", "কনটেক্সট পাওয়া যায়নি")
-                res.keys().forEach { k -> result.put(k, res.get(k)) }
+                copyAutomationResult(automationHandler?.getPlaybookHealth(pId), result, "প্লেবুক স্বাস্থ্য প্রতিবেদন।")
             }
 
             "humanConfirm" -> {
@@ -2040,7 +2398,8 @@ class AssistantToolExecutor(
                     result.put("skillId", saved.skillId)
                     result.put("name", saved.name)
                     result.put("stepCount", saved.stepCount)
-                    result.put("summaryBengali", "‘${saved.nameBengali}’ কাজটি সফলভাবে স্কিল লাইব্রেরিতে সংরক্ষিত হয়েছে (${saved.stepCount}টি ধাপ রেকর্ড করা হয়েছে)।")
+                    result.put("status", saved.status)
+                    result.put("summaryBengali", "‘${saved.nameBengali}’ কাজটি ${saved.status} (খসড়া) হিসেবে স্কিল লাইব্রেরিতে সংরক্ষিত হয়েছে (${saved.stepCount}টি ধাপ)। অনুমোদনের পর এটি অটো-রান হবে।")
                 } else {
                     result.put("success", false)
                     result.put("summaryBengali", "স্কিল সেভ করা সম্ভব হয়নি — রিপোজিটরি অনুপস্থিত।")
@@ -2062,13 +2421,15 @@ class AssistantToolExecutor(
                             put("successCount", s.successCount)
                         })
                     }
+                    result.put("success", true)
                     result.put("count", list.size)
                     result.put("skills", arr)
                     result.put("summaryBengali", "মোট ${list.size}টি শেখা কাজ পাওয়া গেছে।")
                 } else {
+                    result.put("success", false)
                     result.put("count", 0)
                     result.put("skills", JSONArray())
-                    result.put("summaryBengali", "কোনো শেখা কাজ পাওয়া যায়নি।")
+                    result.put("summaryBengali", "স্কিল লাইব্রেরি অ্যাক্সেস করা যায়নি (কনটেক্সট অনুপস্থিত)।")
                 }
             }
 
@@ -2150,8 +2511,8 @@ class AssistantToolExecutor(
                                         }
                                         "CLICK" -> {
                                             val clicked = when {
-                                                !resolvedTargetId.isNullOrBlank() -> service.clickElementById(resolvedTargetId)
-                                                !resolvedTargetText.isNullOrBlank() -> service.clickElementByText(resolvedTargetText)
+                                                !resolvedTargetId.isNullOrBlank() -> service.clickElementByIdAwait(resolvedTargetId)
+                                                !resolvedTargetText.isNullOrBlank() -> service.clickElementByTextAwait(resolvedTargetText)
                                                 else -> false
                                             }
                                             if (clicked || step.isOptional) executedCount++
@@ -2164,13 +2525,13 @@ class AssistantToolExecutor(
                                             kotlinx.coroutines.delay(step.delayAfterMs)
                                         }
                                         "SCROLL_FORWARD" -> {
-                                            service.swipeDirection("down")
-                                            executedCount++
+                                            val swiped = service.swipeDirectionAwait("scroll_down")
+                                            if (swiped || step.isOptional) executedCount++
                                             kotlinx.coroutines.delay(step.delayAfterMs)
                                         }
                                         "SCROLL_BACKWARD" -> {
-                                            service.swipeDirection("up")
-                                            executedCount++
+                                            val swiped = service.swipeDirectionAwait("scroll_up")
+                                            if (swiped || step.isOptional) executedCount++
                                             kotlinx.coroutines.delay(step.delayAfterMs)
                                         }
                                         "BACK" -> {
@@ -2300,6 +2661,560 @@ class AssistantToolExecutor(
                     result.put("success", false)
                     result.put("summaryBengali", "গিটহাব রিপোজিটরি ইউআরএল প্রদান করুন।")
                 }
+            }
+
+            "learnFromText" -> {
+                val instruction = args.optString("instruction", "").trim()
+                val title = args.optString("title", "").trim()
+                val dryRun = args.optBoolean("dryRun", false)
+                val learnRes = com.example.automation.TextLearningEngine.learnFromText(
+                    context = context,
+                    instructionText = instruction,
+                    title = title,
+                    dryRunOnly = dryRun,
+                    daoOverride = dao,
+                    skillRepoOverride = skillRepo
+                )
+                learnRes.keys().forEach { k -> result.put(k, learnRes.get(k)) }
+            }
+
+            "deepResearchWeb" -> {
+                val query = args.optString("query", "").trim()
+                val kr = com.example.knowledge.IntelligentKnowledgeRouter.query(
+                    query = query,
+                    context = context,
+                    modeOverride = com.example.knowledge.RetrievalMode.DEEP_RESEARCH,
+                    knowledgeDaoOverride = context?.let { AssistantDatabase.getDatabase(it).knowledgeDao() },
+                    onProgressiveStage = { stageLabel, partialSummary, isFinal ->
+                        if (!isFinal) {
+                            PlaybackInterruptionBridge.activeSessionManager()?.sendProgressiveKnowledgeUpdate(
+                                stageLabel = stageLabel,
+                                summaryText = partialSummary,
+                                requestVoiceSpeech = false
+                            )
+                        }
+                    }
+                )
+                val extractedCount = kr.citations.count { it.contentExtracted }
+                val blockedCount = kr.citations.count { !it.contentExtracted }
+                result.put("success", !kr.cancelled && !kr.offlineFallback && kr.citations.isNotEmpty())
+                result.put("status", if (kr.cancelled) "CANCELLED" else if (kr.offlineFallback) "OFFLINE_LIMITED" else if (kr.citations.isNotEmpty()) "SUCCESS" else "NO_RESULTS")
+                result.put("verificationStatus", kr.verificationStatus.name)
+                result.put("cacheTier", kr.cacheTierReached.name)
+                result.put("storageState", kr.storageState.name)
+                result.put("crossCheckStatus", when (kr.verificationStatus) {
+                    com.example.knowledge.ClaimStatus.VERIFIED -> "MULTI_SOURCE_CORROBORATED"
+                    com.example.knowledge.ClaimStatus.CONFLICTING -> "CONFLICTING"
+                    com.example.knowledge.ClaimStatus.SINGLE_SOURCE_ONLY -> "SINGLE_SOURCE_EXTRACTED"
+                    else -> "SNIPPET_ONLY"
+                })
+                result.put("extractedSourceCount", extractedCount)
+                result.put("blockedSourceCount", blockedCount)
+                result.put("firstResponseMs", kr.firstResponseMs)
+                result.put("totalLatencyMs", kr.totalLatencyMs)
+                val citationsArr = org.json.JSONArray()
+                kr.citations.forEach { f ->
+                    citationsArr.put(JSONObject().apply {
+                        put("title", f.title)
+                        put("url", f.url)
+                        put("canonicalUrl", f.canonicalUrl)
+                        put("domain", f.domain)
+                        put("contentExtracted", f.contentExtracted)
+                        put("snippetOnly", !f.contentExtracted)
+                    })
+                }
+                result.put("citations", citationsArr)
+                result.put("summaryBengali", kr.summaryBengali)
+            }
+
+            "intelligentKnowledgeQuery" -> {
+                val query = args.optString("query", "").trim()
+                val rawMode = args.optString("mode", "").trim().uppercase(Locale.ROOT)
+                val modeOverride = when (rawMode) {
+                    "DEEP_RESEARCH" -> com.example.knowledge.RetrievalMode.DEEP_RESEARCH
+                    "FAST_RETRIEVAL" -> com.example.knowledge.RetrievalMode.FAST_RETRIEVAL
+                    else -> null
+                }
+                val kr = com.example.knowledge.IntelligentKnowledgeRouter.query(
+                    query = query,
+                    context = context,
+                    modeOverride = modeOverride,
+                    knowledgeDaoOverride = context?.let { AssistantDatabase.getDatabase(it).knowledgeDao() },
+                    onProgressiveStage = { stageLabel, partialSummary, isFinal ->
+                        PlaybackInterruptionBridge.activeSessionManager()?.sendProgressiveKnowledgeUpdate(
+                            stageLabel = stageLabel,
+                            summaryText = partialSummary,
+                            requestVoiceSpeech = isFinal
+                        )
+                    }
+                )
+                result.put("success", !kr.cancelled && !kr.offlineFallback && (kr.citations.isNotEmpty() || kr.summaryBengali.isNotBlank()))
+                result.put("status", if (kr.cancelled) "CANCELLED" else if (kr.offlineFallback) "OFFLINE_LIMITED" else "SUCCESS")
+                result.put("mode", kr.mode.name)
+                result.put("cacheTier", kr.cacheTierReached.name)
+                result.put("verificationStatus", kr.verificationStatus.name)
+                result.put("storageState", kr.storageState.name)
+                result.put("firstResponseMs", kr.firstResponseMs)
+                result.put("totalLatencyMs", kr.totalLatencyMs)
+                result.put("bytesTransferred", kr.bytesTransferred)
+                result.put("summaryBengali", kr.summaryBengali)
+            }
+
+            "getKnowledgeSystemStatus" -> {
+                val status = com.example.knowledge.IntelligentKnowledgeRouter.liveStatus.value
+                result.put("success", true)
+                result.put("controllerAgent", status.controllerAgentName)
+                result.put("specialistAgent", status.specialistAgentName)
+                result.put("activeMode", status.activeMode.name)
+                result.put("cacheTierReached", status.cacheTierReached.name)
+                result.put("evidenceStatus", status.evidenceStatus.name)
+                result.put("storageState", status.storageState.name)
+                result.put("serverConnectionState", status.serverConnectionState)
+                result.put("l1HitCount", status.l1HitCount)
+                result.put("l2EntryCount", status.l2EntryCount)
+                result.put("lastLatencyMs", status.lastLatencyMs)
+                result.put("isResearchRunning", status.isResearchRunning)
+                result.put(
+                    "summaryBengali",
+                    "নলেজ সিস্টেম স্ট্যাটাস: কন্ট্রোলার=${status.controllerAgentName}, স্পেশালিস্ট=${status.specialistAgentName}, টিয়ার=${status.cacheTierReached}, প্রমাণ=${status.evidenceStatus}, স্টোরেজ=${status.storageState}, সার্ভার=${status.serverConnectionState}।"
+                )
+            }
+
+            "cancelDeepResearch" -> {
+                val cancelled = com.example.knowledge.IntelligentKnowledgeRouter.cancelActiveResearch()
+                result.put("success", true)
+                result.put("cancelledActiveJob", cancelled)
+                result.put(
+                    "summaryBengali",
+                    if (cancelled) "চলমান ডিপ রিসার্চ ও নেটওয়ার্ক অনুরোধ বাতিল করা হয়েছে।"
+                    else "এই মুহূর্তে কোনো সক্রিয় ডিপ রিসার্চ চলছিল না।"
+                )
+            }
+
+            "calculateDistanceAndRoute" -> {
+                val destInput = args.optString("destination", "").trim()
+                val explicitOrigin = args.optString("origin", "").trim()
+                val travelMode = args.optString("travelMode", "driving").trim().ifBlank { "driving" }
+                val launchMaps = args.optBoolean("launchMaps", false)
+
+                if (destInput.isBlank()) {
+                    result.put("success", false)
+                    result.put("summaryBengali", "অনুগ্রহ করে গন্তব্যের নাম বা অক্ষাংশ/দ্রাঘিমাংশ উল্লেখ করুন।")
+                } else {
+                    var originCoords: Pair<Double, Double>? = null
+                    var originLabel = ""
+                    var originSource = "UNKNOWN"
+                    var originIsCached = false
+                    var originTimestamp = 0L
+                    var originBlocked = false
+
+                    if (explicitOrigin.isNotBlank()) {
+                        val originGeo = com.example.util.BangladeshCalendarAndGeoEngine.geocodeWorldwidePlace(context, explicitOrigin)
+                        if (originGeo != null) {
+                            originCoords = originGeo.latitude to originGeo.longitude
+                            originLabel = originGeo.displayName
+                            originSource = originGeo.source
+                        }
+                    } else {
+                        if (context == null || !com.example.util.JarvisLiveLocationTracker.isLocationPermissionGranted(context)) {
+                            result.put("success", false)
+                            result.put("status", "PERMISSION_REQUIRED")
+                            result.put("needsLocationPermission", true)
+                            result.put("requiredPermission", "location")
+                            result.put("permissionRequired", "location_fine")
+                            result.put("summaryBengali", "প্রারম্ভিক অবস্থান (Origin) উল্লেখ না থাকায় লাইভ জিপিএস প্রয়োজন। দয়া করে লোকেশন পারমিশন দিন অথবা শুরুর শহরের নাম বলুন।")
+                            originBlocked = true
+                        } else {
+                            val (gpsOk, liveLoc) = com.example.util.JarvisLiveLocationTracker.fetchCurrentLocation(context)
+                            if (gpsOk && liveLoc != null && (liveLoc.latitude != 0.0 || liveLoc.longitude != 0.0)) {
+                                originCoords = liveLoc.latitude to liveLoc.longitude
+                                originLabel = liveLoc.fullAddress
+                                originSource = if (liveLoc.isCached) "GPS_CACHED" else "GPS_LIVE"
+                                originIsCached = liveLoc.isCached
+                                originTimestamp = liveLoc.timestamp
+                            } else {
+                                result.put("success", false)
+                                result.put("status", "LOCATION_UNRESOLVED")
+                                result.put("summaryBengali", "বর্তমান লাইভ জিপিএস অবস্থান পাওয়া যায়নি। ফোনের লোকেশন চালু করুন অথবা শুরুর শহরের নাম দিন (যেমন: ঢাকা থেকে খুলনা)।")
+                                originBlocked = true
+                            }
+                        }
+                    }
+
+                    if (!originBlocked) {
+                        val destGeo = com.example.util.BangladeshCalendarAndGeoEngine.geocodeWorldwidePlace(context, destInput)
+                        if (originCoords != null && destGeo != null) {
+                            val calc = com.example.util.BangladeshCalendarAndGeoEngine.calculateWorldwideRouteAndEta(
+                                originLat = originCoords.first,
+                                originLng = originCoords.second,
+                                destLat = destGeo.latitude,
+                                destLng = destGeo.longitude,
+                                originLabel = originLabel,
+                                destLabel = destGeo.displayName,
+                                travelMode = travelMode
+                            )
+                            val cachedNote = if (originIsCached && originTimestamp > 0L) {
+                                val ageMin = ((System.currentTimeMillis() - originTimestamp).coerceAtLeast(0L) / 60_000L)
+                                "\n(সতর্কতা: লাইভ স্যাটেলাইট ফিক্স না থাকায় $ageMin মিনিট আগের ক্যাশড জিপিএস লোকেশন ব্যবহৃত হয়েছে)"
+                            } else ""
+                            result.put("success", true)
+                            result.put("distanceKm", calc.distanceKm)
+                            result.put("distanceMeters", calc.distanceMeters)
+                            result.put("estimatedDriveMinutes", calc.estimatedDriveMinutes)
+                            result.put("estimatedWalkMinutes", calc.estimatedWalkMinutes)
+                            result.put("travelMode", travelMode)
+                            result.put("mapsRouteUri", calc.mapsRouteUri)
+                            result.put("routeSource", calc.routeSource)
+                            result.put("isExactRoadRoute", calc.isExactRoadRoute)
+                            result.put("originSource", originSource)
+                            result.put("destinationSource", destGeo.source)
+                            result.put("originIsCached", originIsCached)
+                            result.put("summaryBengali", calc.summaryBengali + cachedNote)
+                            if (launchMaps && context != null) {
+                                val mapLaunch = com.example.util.BangladeshCalendarAndGeoEngine.launchGoogleMapsRoute(
+                                    context = context,
+                                    destinationQueryOrCoords = destInput,
+                                    originLat = originCoords.first,
+                                    originLng = originCoords.second,
+                                    destLat = destGeo.latitude,
+                                    destLng = destGeo.longitude,
+                                    travelMode = travelMode
+                                )
+                                result.put("mapsLaunched", mapLaunch.optBoolean("success", false))
+                            }
+                        } else if (launchMaps && context != null) {
+                            val mapLaunch = com.example.util.BangladeshCalendarAndGeoEngine.launchGoogleMapsRoute(
+                                context = context,
+                                destinationQueryOrCoords = destInput,
+                                travelMode = travelMode
+                            )
+                            mapLaunch.keys().forEach { k -> result.put(k, mapLaunch.get(k)) }
+                        } else {
+                            result.put("success", false)
+                            result.put("status", "LOCATION_UNRESOLVED")
+                            val failedPlace = if (originCoords == null) explicitOrigin.ifBlank { "বর্তমান অবস্থান" } else destInput
+                            result.put(
+                                "summaryBengali",
+                                "'$failedPlace'-এর সঠিক ভৌগোলিক কোঅর্ডিনেট অনলাইন/অফলাইন জিওকোডারে পাওয়া যায়নি। Google Maps রুট খুলতে launchMaps=true ব্যবহার করুন অথবা 'lat,lng' ফরম্যাটে স্থান দিন।"
+                            )
+                        }
+                    }
+                }
+            }
+
+            "getBangladeshDateTimeAndCalendar" -> {
+                val isoInput = args.optString("isoDate", "").trim()
+                if (isoInput.isNotBlank()) {
+                    try {
+                        val parsed = java.time.LocalDate.parse(isoInput)
+                        val bnDate = com.example.util.BangladeshCalendarAndGeoEngine.toRevisedBangladeshBanglaDate(parsed)
+                        result.put("success", true)
+                        result.put("isoDate", parsed.toString())
+                        result.put("banglaDay", bnDate.day)
+                        result.put("banglaMonthIndex", bnDate.monthIndex)
+                        result.put("banglaMonthBn", bnDate.monthNameBn)
+                        result.put("banglaYear", bnDate.banglaYear)
+                        result.put("banglaSeasonBn", bnDate.seasonBn)
+                        result.put("isLeapFalgun", bnDate.isLeapFalgun)
+                        result.put("banglaFormatted", bnDate.formattedBengali)
+                        result.put("summaryBengali", "${parsed}: সংশোধিত বাংলা বর্ষপঞ্জি অনুযায়ী ${bnDate.formattedBengali}।")
+                    } catch (_: Exception) {
+                        result.put("success", false)
+                        result.put("summaryBengali", "সঠিক YYYY-MM-DD ফরম্যাটে তারিখ দিন।")
+                    }
+                } else {
+                    val report = com.example.util.BangladeshCalendarAndGeoEngine.getCurrentDhakaDateTimeReport()
+                    report.keys().forEach { k -> result.put(k, report.get(k)) }
+                }
+            }
+
+            "verifyWhatsAppMessageStatus" -> {
+                val handler = automationHandler
+                if (handler != null) {
+                    val statusRes = handler.verifyWhatsAppMessageDeliveryStatus()
+                    statusRes.keys().forEach { k -> result.put(k, statusRes.get(k)) }
+                } else {
+                    result.put("success", false)
+                    result.put("summaryBengali", "অটোমেশন হ্যান্ডলার প্রস্তুত নয়।")
+                }
+            }
+
+            "listInstalledApps" -> {
+                val q = args.optString("query", "").trim()
+                val page = args.optInt("page", 0).coerceAtLeast(0)
+                val pageSize = args.optInt("pageSize", 100).coerceIn(1, 500)
+                val checkApp = args.optString("checkApp", "").trim()
+                if (context != null) {
+                    if (checkApp.isNotBlank()) {
+                        val entry = com.example.util.JarvisDeviceAutomationHelper.isAppAvailable(context, checkApp)
+                        result.put("success", true)
+                        result.put("installed", entry != null)
+                        if (entry != null) {
+                            result.put("packageName", entry.packageName)
+                            result.put("appName", entry.appName)
+                            result.put("activityName", entry.activityName)
+                            result.put("isLaunchable", entry.isLaunchable)
+                            result.put("summaryBengali", "'${entry.appName}' (${entry.packageName}) ডিভাইসে ইনস্টল ও চালুযোগ্য অবস্থায় রয়েছে।")
+                        } else {
+                            result.put("summaryBengali", "'$checkApp' নামের অ্যাপ ডিভাইসে ইনস্টলকৃত তালিকায় পাওয়া যায়নি।")
+                        }
+                    } else {
+                        val paged = com.example.util.JarvisDeviceAutomationHelper.discoverInstalledAppsPaged(
+                            context = context,
+                            filterQuery = q,
+                            page = page,
+                            pageSize = pageSize
+                        )
+                        val arr = org.json.JSONArray()
+                        paged.apps.forEach { entry ->
+                            arr.put(JSONObject().apply {
+                                put("packageName", entry.packageName)
+                                put("appName", entry.appName)
+                                put("activityName", entry.activityName)
+                                put("isLaunchable", entry.isLaunchable)
+                                put("isSystemApp", entry.isSystemApp)
+                            })
+                        }
+                        result.put("success", true)
+                        result.put("count", paged.apps.size)
+                        result.put("totalCount", paged.totalCount)
+                        result.put("page", paged.page)
+                        result.put("pageSize", paged.pageSize)
+                        result.put("hasMore", paged.hasMore)
+                        paged.nextPage?.let { result.put("nextPage", it) }
+                        result.put("apps", arr)
+                        result.put(
+                            "summaryBengali",
+                            if (paged.totalCount == 0) "'$q' নামের কোনো অ্যাপ ইনস্টলকৃত তালিকায় পাওয়া যায়নি।"
+                            else "ডিভাইসে মোট ${paged.totalCount}টি চালুযোগ্য অ্যাপ শনাক্ত হয়েছে (পৃষ্ঠা ${paged.page + 1}: ${paged.apps.size}টি প্রদর্শিত${if (q.isNotBlank()) ", '$q' ফিল্টার" else ""})।"
+                        )
+                    }
+                } else {
+                    result.put("success", false)
+                    result.put("summaryBengali", "অ্যাপ তালিকা দেখতে অ্যান্ড্রয়েড কনটেক্সট প্রয়োজন।")
+                }
+            }
+
+            "readVisibleAppData" -> {
+                val filterKeyword = args.optString("filterKeyword", "").trim()
+                if (context != null) {
+                    val report = com.example.util.JarvisDeviceAutomationHelper.readVisibleAppData(context, filterKeyword)
+                    result.put("success", report.success)
+                    result.put("foregroundPackage", report.foregroundPackage)
+                    result.put("totalVisibleItems", report.totalVisibleItems)
+                    result.put("uniqueCount", report.uniqueCount)
+                    result.put("duplicateItems", JSONArray(report.duplicateItems))
+                    result.put("items", JSONArray(report.items))
+                    result.put("stockMentions", JSONArray(report.stockMentions))
+                    if (!report.success && com.example.service.JarvisAccessibilityService.instance == null) {
+                        result.put("permissionRequired", "accessibility")
+                    }
+                    result.put("summaryBengali", report.summaryBengali)
+                } else {
+                    result.put("success", false)
+                    result.put("summaryBengali", "স্ক্রিনের দৃশ্যমান ডেটা পড়তে কনটেক্সট প্রয়োজন।")
+                }
+            }
+
+            "startHomeDevTask" -> {
+                val goal = args.optString("goal", "").trim()
+                if (goal.isBlank()) {
+                    result.put("success", false)
+                    result.put("summaryBengali", "কাজের লক্ষ্য (goal) উল্লেখ করুন।")
+                } else if (context == null) {
+                    result.put("success", false)
+                    result.put("summaryBengali", "হোম ডেভেলপার চালাতে অ্যান্ড্রয়েড কনটেক্সট প্রয়োজন।")
+                } else {
+                    val category = args.optString("category", "FEATURE")
+                    val sourceType = args.optString("sourceType", "TEXT")
+                    val sourceUrl = args.optString("sourceUrl", "")
+                    val task = com.example.developer.HomeDeveloperOrchestrator.startTask(
+                        context = context,
+                        goal = goal,
+                        category = category,
+                        sourceType = sourceType,
+                        sourceUrl = sourceUrl
+                    )
+                    result.put("success", task.status != "FAILED")
+                    result.put("taskId", task.taskId)
+                    result.put("taskStatus", task.status)
+                    result.put("phase", task.phase)
+                    result.put("progressPercent", task.computeProgressPercent())
+                    result.put("summaryBengali", com.example.developer.HomeDeveloperOrchestrator.getLiveVoiceReport())
+                }
+            }
+
+            "pauseHomeDeveloper" -> {
+                val reason = args.optString("reason", "VOICE_OR_TOOL_PAUSE")
+                val paused = com.example.developer.HomeDeveloperOrchestrator.pauseOrStopCleanly(reason, context)
+                result.put("success", true)
+                result.put("status", "SUCCESS")
+                result.put("taskStatus", paused?.status ?: "IDLE")
+                result.put("progressPercent", paused?.computeProgressPercent() ?: 0)
+                result.put(
+                    "summaryBengali",
+                    if (paused != null) "হোম ডেভেলপার কাজটি ${paused.computeProgressPercent()}% অবস্থায় চেকপয়েন্ট সেভ করে বিরতি নিয়েছে।"
+                    else "হোম ডেভেলপার এখন কোনো কাজ করছে না (০%)।"
+                )
+            }
+
+            "resumeHomeDeveloper" -> {
+                val taskId = args.optString("taskId", "")
+                val resumed = com.example.developer.HomeDeveloperOrchestrator.resumeFromCheckpoint(taskId, context)
+                result.put("success", resumed != null)
+                result.put("taskId", resumed?.taskId ?: "")
+                result.put("taskStatus", resumed?.status ?: "NONE")
+                result.put("progressPercent", resumed?.computeProgressPercent() ?: 0)
+                result.put(
+                    "summaryBengali",
+                    if (resumed != null) com.example.developer.HomeDeveloperOrchestrator.getLiveVoiceReport()
+                    else "রিজিউম করার মতো কোনো সংরক্ষিত চেকপয়েন্ট পাওয়া যায়নি।"
+                )
+            }
+
+            "cancelHomeDeveloper" -> {
+                val taskId = args.optString("taskId", "")
+                val cancelled = com.example.developer.HomeDeveloperOrchestrator.cancelAndQuarantine(taskId, context)
+                result.put("success", true)
+                result.put("taskId", cancelled.taskId)
+                result.put("taskStatus", cancelled.status)
+                result.put("summaryBengali", "হোম ডেভেলপারের কাজ বাতিল ও অসম্পূর্ণ ড্রাফট কোয়ারেন্টাইন করা হয়েছে; মূল সিস্টেম সুরক্ষিত আছে।")
+            }
+
+            "getHomeDevStatus" -> {
+                val s = com.example.developer.HomeDeveloperOrchestrator.devState.value
+                result.put("success", true)
+                result.put("selfDevelopmentEnabled", s.selfDevelopmentEnabled)
+                result.put("taskStatus", s.status.name)
+                result.put("phase", s.phase.name)
+                result.put("indicatorState", s.indicatorState.name)
+                result.put("progressPercent", s.progressPercent)
+                result.put("activeTaskId", s.activeTaskId)
+                result.put("activeTaskGoal", s.activeTaskGoal)
+                result.put("projectHealthScore", s.projectHealthScore)
+                result.put("summaryBengali", com.example.developer.HomeDeveloperOrchestrator.getLiveVoiceReport())
+            }
+
+            "runSelfRepairAudit" -> {
+                if (context == null) {
+                    result.put("success", false)
+                    result.put("summaryBengali", "অডিট চালাতে কনটেক্সট প্রয়োজন।")
+                } else {
+                    val snap = com.example.developer.HomeDeveloperOrchestrator.runSelfRepairAudit(context)
+                    result.put("success", true)
+                    result.put("projectHealthScore", snap.projectHealthScore)
+                    result.put("capabilityCoveragePercent", snap.capabilityCoveragePercent)
+                    result.put("totalTools", snap.totalTools)
+                    result.put("activeSkillsCount", snap.activeSkillsCount)
+                    result.put("gapCount", snap.detectedGaps.size)
+                    result.put(
+                        "summaryBengali",
+                        "সেল্ফ-রিপেয়ার অডিট সম্পন্ন: হেলথ স্কোর ${snap.projectHealthScore}%, ${snap.totalTools}টি টুল, ${snap.activeSkillsCount}টি সক্রিয় স্কিল ও ${snap.detectedGaps.size}টি গ্যাপ শনাক্ত হয়েছে।"
+                    )
+                }
+            }
+
+            "createCombinedSkill" -> {
+                val ids = args.optString("skillIds", "").split(',').map { it.trim() }.filter { it.isNotBlank() }
+                val newName = args.optString("newSkillName", "Combined Skill")
+                val res = com.example.developer.UniversalSkillFactory.combineSkills(
+                    context = context,
+                    skillIds = ids,
+                    newSkillName = newName,
+                    skillRepoOverride = skillRepo
+                )
+                result.put("success", res.success)
+                result.put("skillId", res.skillId)
+                result.put("stepCount", res.stepCount)
+                result.put("summaryBengali", res.summaryBn)
+            }
+
+            "learnFromDocument" -> {
+                val fileName = args.optString("fileName", "guide.md")
+                val content = args.optString("content", "")
+                val res = com.example.developer.UniversalSkillFactory.learnFromDocument(
+                    context = context,
+                    fileName = fileName,
+                    documentContent = content,
+                    skillRepoOverride = skillRepo,
+                    assistantDaoOverride = dao
+                )
+                result.put("success", res.success)
+                result.put("skillId", res.skillId)
+                result.put("artifactId", res.artifactId)
+                result.put("summaryBengali", res.summaryBn)
+            }
+
+            "learnFromScreenshot" -> {
+                val observed = args.optString("observedText", "")
+                val targetApp = args.optString("targetApp", "")
+                val title = args.optString("title", "")
+                val res = com.example.developer.UniversalSkillFactory.learnFromScreenshotOrVisionText(
+                    context = context,
+                    observedUiText = observed,
+                    targetAppHint = targetApp,
+                    title = title,
+                    skillRepoOverride = skillRepo
+                )
+                result.put("success", res.success)
+                result.put("skillId", res.skillId)
+                result.put("stepCount", res.stepCount)
+                result.put("summaryBengali", res.summaryBn)
+            }
+
+            "setSelfDevelopmentMode" -> {
+                if (context == null) {
+                    result.put("success", false)
+                    result.put("summaryBengali", "সেটিংস পরিবর্তনে কনটেক্সট প্রয়োজন।")
+                } else {
+                    val enabled = args.optBoolean("enabled", false)
+                    val levelStr = args.optString("autonomyLevel", "")
+                    val settingsRepo = com.example.developer.HomeDeveloperSettingsRepository(context)
+                    var updated = settingsRepo.setSelfDevelopmentEnabled(enabled)
+                    if (levelStr.isNotBlank()) {
+                        updated = settingsRepo.setAutonomyLevel(com.example.developer.AutonomyLevel.fromString(levelStr))
+                    }
+                    if (enabled && updated.autonomyLevel == com.example.developer.AutonomyLevel.L4_SCHEDULED_BACKGROUND) {
+                        com.example.developer.HomeDeveloperScheduler.scheduleBackgroundDevelopment(context, updated)
+                    } else if (!enabled) {
+                        com.example.developer.HomeDeveloperScheduler.cancelScheduledWork(context)
+                    }
+                    com.example.developer.HomeDeveloperOrchestrator.syncInitialStateFromDatabase(context, settingsRepoOverride = settingsRepo)
+                    result.put("success", true)
+                    result.put("selfDevelopmentEnabled", updated.selfDevelopmentEnabled)
+                    result.put("autonomyLevel", updated.autonomyLevel.name)
+                    result.put(
+                        "summaryBengali",
+                        "সেল্ফ-ডেভেলপমেন্ট মোড ${if (enabled) "চালু (${updated.autonomyLevel.titleBn})" else "বন্ধ"} করা হয়েছে।"
+                    )
+                }
+            }
+
+            "generateDeveloperArtifact" -> {
+                val targetFile = args.optString("targetFile", "feature.kt")
+                val goal = args.optString("goal", "")
+                val isWeb = args.optBoolean("isWebApp", false)
+                val outcome = if (isWeb) {
+                    com.example.developer.DeveloperWorkspaceEngine.generateWebAppWorkspace(
+                        context = context,
+                        appTitle = targetFile.substringBefore('.'),
+                        goalPrompt = goal,
+                        assistantDaoOverride = dao
+                    )
+                } else {
+                    com.example.developer.DeveloperWorkspaceEngine.generateLanguagePatchAndTestStub(
+                        context = context,
+                        targetFile = targetFile,
+                        goalPrompt = goal,
+                        assistantDaoOverride = dao
+                    )
+                }
+                result.put("success", outcome.success)
+                result.put("patchId", outcome.patch.patchId)
+                result.put("artifactId", outcome.artifactId)
+                result.put("securityStatus", outcome.patch.securityStatus)
+                result.put("compileStatus", outcome.patch.compileStatus)
+                result.put("summaryBengali", outcome.messageBn)
             }
 
             else -> return false

@@ -29,7 +29,8 @@ data class LiveGpsLocation(
     val district: String = "",
     val division: String = "",
     val country: String = "Bangladesh",
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val isCached: Boolean = false
 )
 
 object JarvisLiveLocationTracker {
@@ -100,18 +101,20 @@ object JarvisLiveLocationTracker {
         }
 
         if (resolvedLocation == null) {
-            // Check if last saved location in SharedPreferences exists
+            // Check if last saved location in SharedPreferences exists — preserve real timestamp & mark isCached=true
             val prefs = context.getSharedPreferences("jarvis_gps_cache", Context.MODE_PRIVATE)
             val savedLat = prefs.getFloat("lat", 0f).toDouble()
             val savedLng = prefs.getFloat("lng", 0f).toDouble()
             val savedAddr = prefs.getString("addr", "") ?: ""
+            val savedTime = prefs.getLong("time", 0L).let { if (it > 0L) it else System.currentTimeMillis() }
             if (savedLat != 0.0 && savedLng != 0.0 && savedAddr.isNotBlank()) {
                 val cached = LiveGpsLocation(
                     latitude = savedLat,
                     longitude = savedLng,
                     accuracy = 25f,
                     fullAddress = savedAddr,
-                    timestamp = System.currentTimeMillis()
+                    timestamp = savedTime,
+                    isCached = true
                 )
                 _currentLocation.value = cached
                 return@withContext Pair(true, cached)
@@ -132,6 +135,7 @@ object JarvisLiveLocationTracker {
 
         try {
             val geocoder = Geocoder(context, Locale("bn", "BD"))
+            @Suppress("DEPRECATION")
             val addresses = geocoder.getFromLocation(lat, lng, 1)
             if (!addresses.isNullOrEmpty()) {
                 val addr = addresses[0]
@@ -154,14 +158,18 @@ object JarvisLiveLocationTracker {
                     country
                 ).filterNotNull().filter { it.isNotBlank() }.distinct()
 
-                formattedAddress = if (parts.isNotEmpty()) parts.joinToString(", ") else "অক্ষাংশ $lat, দ্রাঘিমাংশ $lng"
+                formattedAddress = if (parts.isNotEmpty()) {
+                    parts.joinToString(", ")
+                } else {
+                    "অক্ষাংশ ${String.format(Locale.US, "%.5f", lat)}, দ্রাঘিমাংশ ${String.format(Locale.US, "%.5f", lng)}"
+                }
             }
         } catch (e: Exception) {
             formattedAddress = "অক্ষাংশ ${String.format(Locale.US, "%.5f", lat)}, দ্রাঘিমাংশ ${String.format(Locale.US, "%.5f", lng)}"
         }
 
         if (formattedAddress.isBlank()) {
-            formattedAddress = "মোড়লগঞ্জ, বাগেরহাট, খুলনা বিভাগ"
+            formattedAddress = "অক্ষাংশ ${String.format(Locale.US, "%.5f", lat)}, দ্রাঘিমাংশ ${String.format(Locale.US, "%.5f", lng)}"
         }
 
         val result = LiveGpsLocation(
@@ -173,7 +181,8 @@ object JarvisLiveLocationTracker {
             district = district,
             division = division,
             country = country,
-            timestamp = System.currentTimeMillis()
+            timestamp = System.currentTimeMillis(),
+            isCached = false
         )
 
         _currentLocation.value = result
@@ -201,7 +210,11 @@ object JarvisLiveLocationTracker {
         val lngStr = String.format(Locale.US, "%.4f", loc.longitude)
         val accStr = loc.accuracy.toInt().coerceAtLeast(5)
 
-        return "স্যার, আপনি বর্তমানে ${loc.fullAddress}-এ আছেন। আপনার রিয়েল-টাইম জিপিএস স্থানাঙ্ক হলো অক্ষাংশ $latStr এবং দ্রাঘিমাংশ $lngStr। জিপিএস একুরেসি প্রায় $accStr মিটার।"
+        return if (loc.isCached) {
+            "স্যার, লাইভ জিপিএস সিগন্যাল এই মুহূর্তে পাওয়া যায়নি; সর্বশেষ সংরক্ষিত (ক্যাশকৃত) অবস্থান হলো ${loc.fullAddress}। স্থানাঙ্ক: অক্ষাংশ $latStr, দ্রাঘিমাংশ $lngStr।"
+        } else {
+            "স্যার, আপনি বর্তমানে ${loc.fullAddress}-এ আছেন। আপনার রিয়েল-টাইম জিপিএস স্থানাঙ্ক হলো অক্ষাংশ $latStr এবং দ্রাঘিমাংশ $lngStr। জিপিএস একুরেসি প্রায় $accStr মিটার।"
+        }
     }
 
     fun startContinuousTracking(context: Context) {

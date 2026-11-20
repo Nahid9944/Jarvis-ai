@@ -147,6 +147,31 @@ object JarvisContactSearchEngine {
                     seenPhoneNumbers.add(norm)
                 }
 
+                // Scan all saved frequent contacts for multiple partial/alias matches (for disambiguation)
+                val qLower = trimmed.lowercase()
+                activeDao.getAllFrequentContactsSync().forEach { fc ->
+                    val nameHit = fc.name.lowercase().contains(qLower)
+                    val aliasHit = fc.alias.isNotBlank() && fc.alias.lowercase().contains(qLower)
+                    val relHit = fc.relationship.isNotBlank() && fc.relationship.lowercase().contains(qLower)
+                    if (nameHit || aliasHit || relHit) {
+                        val norm = normalizePhoneNumber(fc.phoneNumber)
+                        if (norm.isNotBlank() && !seenPhoneNumbers.contains(norm)) {
+                            allMatches.add(
+                                ResolvedContact(
+                                    contactId = fc.id,
+                                    name = fc.name,
+                                    primaryPhoneNumber = norm,
+                                    allPhoneNumbers = listOf(norm),
+                                    alias = fc.alias,
+                                    isFavorite = fc.isFavorite,
+                                    source = "DATABASE_ALIAS"
+                                )
+                            )
+                            seenPhoneNumbers.add(norm)
+                        }
+                    }
+                }
+
                 // Check relationship aliases (e.g., "বাবা" -> "Baba")
                 COMMON_RELATIONSHIP_ALIASES[trimmed.lowercase()]?.forEach { altName ->
                     val altMatch = activeDao.getFrequentContactByAliasOrNameSync(altName)

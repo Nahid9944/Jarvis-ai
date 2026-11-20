@@ -24,6 +24,8 @@ import com.example.ui.theme.NahidAiTheme
 import com.example.viewmodel.AssistantViewModel
 
 class MainActivity : ComponentActivity() {
+    private var wakeIntentTick by mutableIntStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         com.example.util.configureAppCheck(this, intent)
@@ -35,7 +37,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = Color(0xFF040814) // Deep Space Dark
                 ) {
-                    JarvisAiApp()
+                    JarvisAiApp(wakeIntentTick = wakeIntentTick)
                 }
             }
         }
@@ -49,11 +51,15 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        wakeIntentTick++
     }
 }
 
 @Composable
-fun JarvisAiApp(viewModel: AssistantViewModel = viewModel()) {
+fun JarvisAiApp(
+    viewModel: AssistantViewModel = viewModel(),
+    wakeIntentTick: Int = 0
+) {
     val context = LocalContext.current
     var currentScreen by remember { mutableStateOf("hud") }
 
@@ -76,20 +82,25 @@ fun JarvisAiApp(viewModel: AssistantViewModel = viewModel()) {
         }
     }
 
-    // Trigger Gemini AI listening session when wake word or global orb is triggered
-    LaunchedEffect(Unit) {
+    // Trigger Gemini AI listening session when wake word, assistant role, or global orb triggers Activity
+    LaunchedEffect(wakeIntentTick) {
         val act = context as? ComponentActivity
-        if (act?.intent?.getBooleanExtra("EXTRA_WAKE_TRIGGERED", false) == true) {
-            viewModel.startLiveSession()
-            viewModel.startMicStreaming()
-        }
-    }
-
-    // Collect background wake word events to auto-trigger listening session
-    LaunchedEffect(Unit) {
-        com.example.service.JarvisWakeWordService.wakeWordEvents.collect {
-            viewModel.startLiveSession()
-            viewModel.startMicStreaming()
+        val activeIntent = act?.intent
+        if (activeIntent?.getBooleanExtra("EXTRA_WAKE_TRIGGERED", false) == true) {
+            val matched = activeIntent.getStringExtra("EXTRA_MATCHED_PHRASE") ?: "assistant_trigger"
+            val remainder = activeIntent.getStringExtra("EXTRA_REMAINDER_COMMAND") ?: ""
+            activeIntent.removeExtra("EXTRA_WAKE_TRIGGERED")
+            activeIntent.removeExtra("EXTRA_MATCHED_PHRASE")
+            activeIntent.removeExtra("EXTRA_REMAINDER_COMMAND")
+            viewModel.handleWakeWordTrigger(
+                matchedPhrase = matched,
+                remainderCommand = remainder
+            ) { inlineCmd ->
+                if (inlineCmd.isNotBlank()) {
+                    currentScreen = "hud"
+                    viewModel.dispatchWakeInlineCommand(inlineCmd)
+                }
+            }
         }
     }
 
@@ -106,6 +117,7 @@ fun JarvisAiApp(viewModel: AssistantViewModel = viewModel()) {
                     route in listOf("control_center", "companion_hub", "character_studio") -> currentScreen = "control_center"
                     route in listOf("profile", "user_profile", "owner") -> currentScreen = "profile"
                     route in listOf("firebase_backup", "backup", "cloud_sync") -> currentScreen = "firebase_backup"
+                    route in listOf("home_developer", "developer", "developer_center") -> currentScreen = "home_developer"
                     route in listOf("hud", "home", "back", "ai_assistant") -> currentScreen = "hud"
                     else -> currentScreen = "hud"
                 }
@@ -176,6 +188,14 @@ fun JarvisAiApp(viewModel: AssistantViewModel = viewModel()) {
             "profile" -> {
                 ProfileScreen(
                     viewModel = viewModel,
+                    onBack = { currentScreen = "hud" }
+                )
+            }
+            "home_developer" -> {
+                com.example.ui.screens.HomeDeveloperCenterScreen(
+                    viewModel = viewModel,
+                    onOpenArtifacts = { viewModel.openHudTab(7) },
+                    onOpenSkills = { viewModel.openHudTab(3) },
                     onBack = { currentScreen = "hud" }
                 )
             }

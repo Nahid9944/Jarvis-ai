@@ -344,13 +344,26 @@ object PlaybookRunner {
         }
 
         // 4. Verification Step
+        var isMediaPlaying = false
+        if (playbook.verify.type == VerifyType.MEDIA_PLAYING || playbook.verify.type == VerifyType.PLAYBACK_TITLE_CONTAINS) {
+            val (playing, _, liveTitle) = JarvisNotificationListenerService.verifyMediaPlaybackState(
+                context = context,
+                packageHint = playbook.appPackage
+            )
+            isMediaPlaying = playing
+            if (!liveTitle.isNullOrBlank()) {
+                lastMediaTitle = liveTitle
+            }
+        }
         val (verified, verifyMsg) = ActionVerifier.verify(
             spec = playbook.verify,
             root = getRootNode(),
             initialScreenHash = initialHash,
             currentScreenHash = currentHash,
             lastReplySuccess = lastReplySuccess,
-            mediaTitle = lastMediaTitle
+            mediaTitle = lastMediaTitle,
+            params = params,
+            isMediaPlaying = isMediaPlaying || !lastMediaTitle.isNullOrBlank()
         )
 
         // Record Rate Limiter & Idempotency on success

@@ -29,9 +29,9 @@ object YouTubePlaybooks {
                     alts = listOf("com.google.android.youtube:id/video_info_view", "com.google.android.youtube:id/title", "android.view.ViewGroup")
                 )
             ),
-            Step.Sleep(800)
+            Step.Sleep(900)
         ),
-        verify = VerifySpec(type = VerifyType.SCREEN_HASH_CHANGED)
+        verify = VerifySpec(type = VerifyType.MEDIA_PLAYING)
     )
 
     val PLAY_VIDEO = Playbook(
@@ -43,9 +43,10 @@ object YouTubePlaybooks {
             ParamSpec("videoId", ParamType.STRING, required = true)
         ),
         steps = listOf(
-            Step.Launch("vnd.youtube://watch?v={videoId}")
+            Step.Launch("vnd.youtube://watch?v={videoId}"),
+            Step.Sleep(900)
         ),
-        verify = VerifySpec(type = VerifyType.SCREEN_HASH_CHANGED)
+        verify = VerifySpec(type = VerifyType.MEDIA_PLAYING)
     )
 
     val PAUSE = Playbook(
@@ -67,7 +68,7 @@ object YouTubePlaybooks {
         steps = listOf(
             Step.MediaAction("PLAY")
         ),
-        verify = VerifySpec(type = VerifyType.CUSTOM)
+        verify = VerifySpec(type = VerifyType.MEDIA_PLAYING)
     )
 
     val NEXT = Playbook(
@@ -81,5 +82,33 @@ object YouTubePlaybooks {
         verify = VerifySpec(type = VerifyType.CUSTOM)
     )
 
-    fun getAll(): List<Playbook> = listOf(SEARCH_PLAY, PLAY_VIDEO, PAUSE, RESUME, NEXT)
+    val PREVIOUS = Playbook(
+        id = "yt.previous",
+        titleBn = "ইউটিউব পূর্ববর্তী ভিডিও",
+        appPackage = "com.google.android.youtube",
+        risk = RiskLevel.SAFE_NAVIGATION,
+        steps = listOf(
+            Step.MediaAction("PREVIOUS")
+        ),
+        verify = VerifySpec(type = VerifyType.CUSTOM)
+    )
+
+    val FULLSCREEN = Playbook(
+        id = "yt.fullscreen",
+        titleBn = "ইউটিউব ফুলস্ক্রিন টগল",
+        appPackage = "com.google.android.youtube",
+        risk = RiskLevel.INTERACTION,
+        steps = listOf(
+            Step.Tap(
+                Selector(
+                    by = By.DESC,
+                    value = "Fullscreen",
+                    alts = listOf("Full screen", "Enter fullscreen", "পূর্ণ স্ক্রিন", "com.google.android.youtube:id/fullscreen_button")
+                )
+            )
+        ),
+        verify = VerifySpec(type = VerifyType.SCREEN_HASH_CHANGED)
+    )
+
+    fun getAll(): List<Playbook> = listOf(SEARCH_PLAY, PLAY_VIDEO, PAUSE, RESUME, NEXT, PREVIOUS, FULLSCREEN)
 }

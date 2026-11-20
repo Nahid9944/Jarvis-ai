@@ -14,6 +14,7 @@ import com.example.service.JarvisWakeWordService
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 data class EmergencyStopReport(
@@ -171,6 +172,18 @@ object JarvisEmergencyStopCoordinator {
             skillHalted = true
         } catch (e: Exception) {
             Log.e(TAG, "Error halting skill recorder / accessibility listener", e)
+        }
+
+        // 9. Pause HOME DEVELOPER work cleanly at checkpoint
+        try {
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                com.example.developer.HomeDeveloperOrchestrator.pauseOrStopCleanly(
+                    reason = "EMERGENCY_STOP",
+                    context = context
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error requesting Home Developer pause", e)
         }
 
         val summary = "জরুরি বিরতি সক্রিয়: চলমান টাস্ক, স্বায়ত্তশাসিত অ্যাকশন লুপ, লাইভ অডিও/বক্তব্য, অ্যানাউন্সমেন্ট কিউ, স্ক্রিন ক্যাপচার, ওয়েক-ওয়ার্ড ও ক্যামেরা ভিশন অবিলম্বে বন্ধ করা হয়েছে।"

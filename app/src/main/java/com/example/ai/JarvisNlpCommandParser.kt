@@ -64,8 +64,10 @@ object JarvisNlpCommandParser {
         if (trimmed.isBlank()) return JarvisParsedCommand.Unrecognized("")
 
         // Strip wake words and polite prefixes
-        var cleaned = trimmed.replace(PREFIX_REGEX, "").trim()
+        val strippedPrefix = trimmed.replace(PREFIX_REGEX, "").trim()
+        val cleaned = UnifiedBrainLanguageEngine.normalizePreservingEntities(strippedPrefix)
         val lower = cleaned.lowercase()
+        val isAppQuestion = UnifiedBrainLanguageEngine.isQuestionOrAnalysisAboutApp(rawInput)
 
         // -2. DEMONSTRATION LEARNING & SKILL INTENTS
         if (matchesStartLearning(lower)) {
@@ -136,15 +138,19 @@ object JarvisNlpCommandParser {
         }
 
         // 6. WHATSAPP AUTOMATION
-        val waParsed = parseWhatsAppCommand(cleaned, lower)
-        if (waParsed != null) {
-            return waParsed
+        if (!isAppQuestion) {
+            val waParsed = parseWhatsAppCommand(cleaned, lower)
+            if (waParsed != null) {
+                return waParsed
+            }
         }
 
         // 7. FACEBOOK AUTOMATION
-        val fbParsed = parseFacebookCommand(cleaned, lower)
-        if (fbParsed != null) {
-            return fbParsed
+        if (!isAppQuestion) {
+            val fbParsed = parseFacebookCommand(cleaned, lower)
+            if (fbParsed != null) {
+                return fbParsed
+            }
         }
 
         // 8. PHONE CALL INTENTS
@@ -172,9 +178,11 @@ object JarvisNlpCommandParser {
         }
 
         // 12. OPEN GENERAL APP INTENTS
-        val appQuery = parseOpenAppCommand(cleaned, lower)
-        if (!appQuery.isNullOrBlank()) {
-            return JarvisParsedCommand.OpenApp(appKey = appQuery.lowercase(), rawQuery = appQuery)
+        if (!isAppQuestion) {
+            val appQuery = parseOpenAppCommand(cleaned, lower)
+            if (!appQuery.isNullOrBlank()) {
+                return JarvisParsedCommand.OpenApp(appKey = appQuery.lowercase(), rawQuery = appQuery)
+            }
         }
 
         // 13. Fallback to LLM / conversational Jarvis
@@ -202,7 +210,7 @@ object JarvisNlpCommandParser {
     /**
      * Executes the parsed command and reports result and feedback.
      */
-    fun execute(
+    suspend fun execute(
         context: Context,
         command: JarvisParsedCommand,
         onPromptAccessibility: () -> Unit
@@ -501,12 +509,10 @@ object JarvisNlpCommandParser {
 
     private fun matchesLocationQuery(lower: String): Boolean {
         return lower.contains("কোথায় আছি") ||
-                lower.contains("কোথায় আছি") ||
                 lower.contains("আমার লোকেশন") ||
                 lower.contains("আমার অবস্থান") ||
                 lower.contains("লাইভ লোকেশন") ||
                 lower.contains("রিয়েল টাইম লোকেশন") ||
-                lower.contains("রিয়েল টাইম লোকেশন") ||
                 lower.contains("লোকেশন ট্র্যাক") ||
                 lower.contains("লোকেশন বলো") ||
                 lower.contains("অবস্থান কত") ||
@@ -521,7 +527,7 @@ object JarvisNlpCommandParser {
     private fun matchesInspectScreen(lower: String): Boolean {
         return lower.contains("স্ক্রিন দেখো") ||
                 lower.contains("স্ক্রিনে কী আছে") ||
-                lower.contains("স্ক্রিন পড়ো") ||
+                lower.contains("স্ক্রিন পড়ো") ||
                 lower.contains("স্ক্রিন ক্যাপচার") ||
                 lower.contains("স্ক্রিন স্ক্যান") ||
                 lower.contains("inspect screen") ||
@@ -601,7 +607,7 @@ object JarvisNlpCommandParser {
         if (matchPrefixEn != null) return matchPrefixEn.groupValues[1].trim()
 
         // e.g. "ইউটিউবে রবীন্দ্রনাথের গান চালাও" or "ইউটিউবে গিয়ে বাংলা গান সার্চ করো"
-        val ytBnRegex1 = Regex("^(?:ইউটিউব|ইউটিউবে)\\s*(?:গিয়ে|গিয়ে)?\\s*(.+?)\\s*(?:চালাও|প্লে করো|বাজাও|সার্চ করো|সার্চ দাও)$")
+        val ytBnRegex1 = Regex("^(?:ইউটিউব|ইউটিউবে)\\s*(?:গিয়ে)?\\s*(.+?)\\s*(?:চালাও|প্লে করো|বাজাও|সার্চ করো|সার্চ দাও)$")
         val matchBn1 = ytBnRegex1.find(cleaned)
         if (matchBn1 != null) return matchBn1.groupValues[1].trim()
 
@@ -613,8 +619,8 @@ object JarvisNlpCommandParser {
         // Banglish: "Motu Patlu play করো YouTube-এ" / "YouTube-এ গিয়ে নাটক চালাও"
         if ((lower.contains("ইউটিউব") || lower.contains("youtube")) && (lower.contains("চালাও") || lower.contains("প্লে") || lower.contains("play") || lower.contains("সার্চ") || lower.contains("search"))) {
             val extracted = cleaned
-                .replace(Regex("ইউটিউব-এ|ইউটিউবে|ইউটিউব|youtube-এ|youtube-এ|youtube\\s*এ|youtube", RegexOption.IGNORE_CASE), "")
-                .replace(Regex("(?:গিয়ে|গিয়ে|চালাও|প্লে করো|প্লে|সার্চ করো|সার্চ দাও|play করো|play|search|করো|দাও|on|in)", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("ইউটিউব-এ|ইউটিউবে|ইউটিউব|youtube-এ|youtube\\s*এ|youtube", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("(?:গিয়ে|চালাও|প্লে করো|প্লে|সার্চ করো|সার্চ দাও|play করো|play|search|করো|দাও|on|in)", RegexOption.IGNORE_CASE), "")
                 .replace(Regex("^[-–\\s]+|[-–\\s]+$"), "")
                 .replace(Regex("\\s+"), " ")
                 .trim()
@@ -654,7 +660,7 @@ object JarvisNlpCommandParser {
         }
 
         // 2. WhatsApp Voice Call: "হোয়াটসঅ্যাপে বাবাকে কল দাও"
-        val waCallRegexBn = Regex("(?:হোয়াটসঅ্যাপে|হোয়াটসঅ্যাপ দিয়ে|whatsapp)\\s*(.+?)(?:\\s*(?:ভয়েস\\s*কল|ভয়েস\\s*কল|কল|ফোন|voice\\s*call|call))\\s*(?:দাও|করো|করুন)", RegexOption.IGNORE_CASE)
+        val waCallRegexBn = Regex("(?:হোয়াটসঅ্যাপে|হোয়াটসঅ্যাপ দিয়ে|whatsapp)\\s*(.+?)(?:\\s*(?:ভয়েস\\s*কল|কল|ফোন|voice\\s*call|call))\\s*(?:দাও|করো|করুন)", RegexOption.IGNORE_CASE)
         val matchCallBn = waCallRegexBn.find(cleaned)
         if (matchCallBn != null) {
             val contact = cleanContact(matchCallBn.groupValues[1])
@@ -708,6 +714,15 @@ object JarvisNlpCommandParser {
             return null
         }
 
+        // Let specialized Facebook feed / like / comment / read tools handle interaction intents
+        if (lower.contains("ফিড") || lower.contains("feed") ||
+            lower.contains("লাইক") || lower.contains("like") ||
+            lower.contains("কমেন্ট") || lower.contains("comment") ||
+            lower.contains("পড়") || lower.contains("read")
+        ) {
+            return null
+        }
+
         // Post on facebook: "ফেসবুকে পোস্ট করো শুভ সকাল"
         val fbPostRegexBn = Regex("(?:ফেসবুক|ফেসবুকে)\\s*(?:পোস্ট|স্ট্যাটাস)\\s*(?:দাও|করো|লিখো)\\s*(?:যে)?\\s*(.+)$")
         val matchBn = fbPostRegexBn.find(cleaned)
@@ -725,6 +740,23 @@ object JarvisNlpCommandParser {
     }
 
     private fun parseCallCommand(cleaned: String, lower: String): String? {
+        // Banglish / mixed-script call: "Baba-ke call dao", "Baba ke koll dao", "Rahim-ke phone koro"
+        val banglishCallRegex = Regex(
+            "^(.+?)(?:-?ke|\\s+ke)?\\s*(?:call|koll|phone)\\s*(?:dao|koro|korun)$",
+            RegexOption.IGNORE_CASE
+        )
+        val matchBanglish = banglishCallRegex.find(cleaned)
+        if (matchBanglish != null) {
+            val target = matchBanglish.groupValues[1].trim().trim('-')
+            if (target.isNotBlank()) return target
+        }
+        val banglishTrailingCallRegex = Regex("^(.+?)(?:-?ke|\\s+ke)\\s+call$", RegexOption.IGNORE_CASE)
+        val matchBanglishTrailing = banglishTrailingCallRegex.find(cleaned)
+        if (matchBanglishTrailing != null) {
+            val target = matchBanglishTrailing.groupValues[1].trim().trim('-')
+            if (target.isNotBlank()) return target
+        }
+
         // e.g. "রহিমকে কল দাও", "রহিমকে ফোন করো", "করিমকে কল দাও"
         val bnCallRegex1 = Regex("^(.+?)(?:কে| এ)?\\s*(?:কল|ফোন|ডায়াল)\\s*(?:দাও|করো|করুন|লাগান)$")
         val matchBn1 = bnCallRegex1.find(cleaned)
@@ -864,15 +896,15 @@ object JarvisNlpCommandParser {
 
     private fun matchesIdentifyCaller(lower: String): Boolean {
         return lower == "কে কল করেছে" || lower == "কলার কে" || lower == "কে ফোন করেছে" ||
-                lower == "কে ফোন দিয়েছে" || lower == "who is calling" || lower == "who's calling" ||
+                lower == "কে ফোন দিয়েছে" || lower == "who is calling" || lower == "who's calling" ||
                 lower.startsWith("কে কল") || lower.contains("কলার কে") || lower.contains("কে কল করেছে") ||
-                lower.contains("কে ফোন করেছে") || lower.contains("কে ফোন দিয়েছে")
+                lower.contains("কে ফোন করেছে") || lower.contains("কে ফোন দিয়েছে")
     }
 
     private fun matchesReadLatestNotification(lower: String): Boolean {
         return lower.contains("সর্বশেষ নোটিফিকেশন") ||
-                lower.contains("নোটিফিকেশন পড়ে শোনাও") ||
-                lower.contains("নোটিফিকেশন পড়ো") ||
+                lower.contains("নোটিফিকেশন পড়ে শোনাও") ||
+                lower.contains("নোটিফিকেশন পড়ো") ||
                 lower.contains("read notification") ||
                 lower.contains("read latest notification") ||
                 lower.contains("নতুন নোটিফিকেশন কি") ||

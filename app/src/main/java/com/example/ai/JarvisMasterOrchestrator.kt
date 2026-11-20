@@ -32,6 +32,14 @@ data class PendingSlotRequest(
     val createdAt: Long = System.currentTimeMillis()
 )
 
+data class AgentSelectionResult(
+    val controllerAgent: AiAgent = AiAgentRegistry.JARVIS_MASTER,
+    val primarySpecialistAgent: AiAgent,
+    val supportingAgents: List<AiAgent> = emptyList(),
+    val intentType: CanonicalIntent = CanonicalIntent.CONVERSATIONAL,
+    val rationaleBn: String = ""
+)
+
 data class MasterExecutionPlan(
     val planId: String = UUID.randomUUID().toString(),
     val goal: String,
@@ -40,7 +48,15 @@ data class MasterExecutionPlan(
     val riskLevel: RiskLevel,
     val requiresConfirmation: Boolean,
     val personalityMode: JarvisPersonalityMode,
-    val detectedEmotion: UserEmotion
+    val detectedEmotion: UserEmotion,
+    val controllerAgent: AiAgent = AiAgentRegistry.JARVIS_MASTER,
+    val primarySpecialistAgent: AiAgent = primaryAgent,
+    val supportingAgents: List<AiAgent> = emptyList(),
+    val intentType: CanonicalIntent = CanonicalIntent.CONVERSATIONAL,
+    val executionMode: String = "STANDARD",
+    val dependencies: List<String> = emptyList(),
+    val retryPolicy: String = "BOUNDED_2",
+    val timeoutPolicy: String = "45S"
 )
 
 data class MasterOrchestrationResult(
@@ -82,6 +98,13 @@ object JarvisMasterOrchestrator {
 
     private val _preferredUserAgent = MutableStateFlow<AiAgent?>(null)
 
+    private val _latestVisionAnalysis = MutableStateFlow<ScreenVisualAnalysis?>(null)
+    val latestVisionAnalysis: StateFlow<ScreenVisualAnalysis?> = _latestVisionAnalysis.asStateFlow()
+
+    fun recordVisionAnalysisContext(analysis: ScreenVisualAnalysis) {
+        _latestVisionAnalysis.value = analysis
+    }
+
     fun setUserSelectedAgent(agent: AiAgent) {
         _preferredUserAgent.value = agent
         _selectedSpecialist.value = agent
@@ -95,6 +118,7 @@ object JarvisMasterOrchestrator {
         _activePlan.value = null
         _lastOrchestrationResult.value = null
         _pendingSlotRequest.value = null
+        _latestVisionAnalysis.value = null
         _preferredUserAgent.value = null
         _selectedSpecialist.value = AiAgentRegistry.JARVIS_MASTER
         inFlightKeys.clear()
@@ -126,11 +150,12 @@ object JarvisMasterOrchestrator {
     }
 
     /**
-     * Selects the appropriate domain specialist agent based on user utterance or tool name.
+     * Selects the appropriate domain specialist agent under JARVIS_MASTER controller governance.
      */
     fun selectSpecialistAgent(utterance: String, toolName: String? = null): AiAgent {
-        val lower = utterance.lowercase(Locale.ROOT)
+        val lower = java.text.Normalizer.normalize(utterance, java.text.Normalizer.Form.NFC).lowercase(Locale.ROOT)
         val t = toolName?.lowercase(Locale.ROOT).orEmpty()
+        val isAppQuestion = UnifiedBrainLanguageEngine.isQuestionOrAnalysisAboutApp(utterance)
 
         return when {
             t.contains("notification") || t == "suggestsmartreplies" ||
@@ -138,9 +163,11 @@ object JarvisMasterOrchestrator {
                 AiAgentRegistry.NOTIFICATION_AGENT
 
             t.contains("call") || t.contains("sms") || t.contains("whatsapp") || t.contains("contact") ||
-                lower.contains("কল") || lower.contains("ফোন") || lower.contains("sms") || lower.contains("এসএমএস") ||
-                lower.contains("whatsapp") || lower.contains("হোয়াটসঅ্যাপ") || lower.contains("হোয়াটসঅ্যাপ") ||
-                lower.contains("মেসেজ") || lower.contains("বার্তা") ->
+                (!isAppQuestion && (
+                    lower.contains("কল") || lower.contains("ফোন") || lower.contains("sms") || lower.contains("এসএমএস") ||
+                    lower.contains("whatsapp") || lower.contains("হোয়াটসঅ্যাপ") ||
+                    lower.contains("মেসেজ") || lower.contains("বার্তা")
+                )) ->
                 AiAgentRegistry.COMMUNICATION_AGENT
 
             t.contains("screen") || t.contains("click") || t.contains("scroll") || t.contains("swipe") ||
@@ -149,7 +176,8 @@ object JarvisMasterOrchestrator {
                 AiAgentRegistry.AUTOMATION_AGENT
 
             t.contains("camera") || t.contains("vision") ||
-                lower.contains("ক্যামেরা") || lower.contains("ছবি") || lower.contains("দেখো") ->
+                lower.contains("ক্যামেরা") || lower.contains("ছবি") ||
+                lower.contains("ছবিটা") || lower.contains("স্ক্রিন দেখো") ->
                 AiAgentRegistry.VISION_AGENT
 
             t.contains("memory") || t.contains("note") ||
@@ -164,9 +192,22 @@ object JarvisMasterOrchestrator {
                 lower.contains("পারমিশন") || lower.contains("সিকিউরিটি") || lower.contains("স্টপ") ->
                 AiAgentRegistry.SECURITY_AGENT
 
-            t.contains("github") || t.contains("youtube") || t.contains("wikipedia") || t.contains("news") ||
-                lower.contains("উইকিপিডিয়া") || lower.contains("সার্চ") || lower.contains("github") ||
-                lower.contains("গিটহাব") || lower.contains("youtube") || lower.contains("ইউটিউব") ->
+            t.contains("intelligent") || t == "intelligentknowledgequery" || t == "deepresearchweb" ||
+                t == "searchexternalknowledge" || t == "getliveweather" || t == "getlivenews" ||
+                t == "searchwikipedia" || t == "getknowledgesystemstatus" || t == "canceldeepresearch" ||
+                lower.contains("গভীর গবেষণা") || lower.contains("ডিপ রিসার্চ") || lower.contains("deep research") ||
+                lower.contains("ক্রস চেক") || lower.contains("ক্রস-চেক") || lower.contains("cross check") ||
+                lower.contains("আবহাওয়া") || lower.contains("weather") || lower.contains("খবর") ||
+                lower.contains("সংবাদ") || lower.contains("news") || lower.contains("উইকিপিডিয়া") ||
+                lower.contains("wikipedia") || lower.contains("সার্চ") ||
+                ((lower.contains("search") || lower.contains("research") || lower.contains("circular") || lower.contains("policy")) &&
+                    !lower.contains("youtube") && !lower.contains("ইউটিউব") && !lower.contains("github") && !lower.contains("গিটহাব")) ||
+                lower.contains("নীতিমালা") || lower.contains("সরকারি") ||
+                lower.contains("গবেষণা") || UnifiedBrainLanguageEngine.isQuestionOrAnalysisAboutApp(utterance) ->
+                AiAgentRegistry.INTELLIGENT_AGENT
+
+            t.contains("github") || t.contains("youtube") ||
+                lower.contains("github") || lower.contains("গিটহাব") || lower.contains("youtube") || lower.contains("ইউটিউব") ->
                 AiAgentRegistry.HOMER_AGENT
 
             t.contains("battery") || t.contains("flashlight") || t.contains("torch") || t.contains("gps") ||
@@ -175,29 +216,71 @@ object JarvisMasterOrchestrator {
                 lower.contains("ব্রাইটনেস") || lower.contains("ভলিউম") || lower.contains("লোকেশন") ->
                 AiAgentRegistry.EDITH_AGENT
 
+            t.contains("homedev") || t.contains("selfrepair") || t.contains("selfdevelopment") ||
+                t == "createcombinedskill" || t == "learndocument" || t == "learnfromdocument" ||
+                t == "learnfromscreenshot" || t == "generatedeveloperartifact" ||
+                lower.contains("home developer") || lower.contains("হোম ডেভেলপার") ||
+                lower.contains("সেল্ফ রিপেয়ার") || lower.contains("সেল্ফ ডেভেলপমেন্ট") ||
+                lower.contains("স্কিল কম্বাইন") || lower.contains("কোড প্যাচ") ||
+                lower.contains("ওয়েব অ্যাপ") ->
+                AiAgentRegistry.HOME_DEVELOPER
+
             else -> AiAgentRegistry.JARVIS_MASTER
         }
+    }
+
+    /**
+     * Explicit Master-Specialist hierarchy selector used by Brain Planning & Live Voice sessions.
+     */
+    fun selectAgentsWithMasterHierarchy(utterance: String, toolName: String? = null): AgentSelectionResult {
+        val structured = UnifiedBrainLanguageEngine.analyze(utterance, updateReferenceContext = false)
+        val firstSegment = structured.compoundSegments.firstOrNull().orEmpty().ifBlank { structured.resolvedQuery }
+        val primarySpecialist = selectSpecialistAgent(firstSegment, toolName)
+        val supporting = mutableListOf<AiAgent>()
+        if (structured.primaryIntent == CanonicalIntent.KNOWLEDGE_DEEP_RESEARCH && primarySpecialist.id != AiAgentRegistry.INTELLIGENT_AGENT.id) {
+            supporting.add(AiAgentRegistry.INTELLIGENT_AGENT)
+        }
+        if (structured.compoundSegments.size > 1) {
+            structured.compoundSegments.drop(1).forEach { seg ->
+                val segAgent = selectSpecialistAgent(seg)
+                if (segAgent.id != primarySpecialist.id && segAgent.id != AiAgentRegistry.JARVIS_MASTER.id && segAgent !in supporting) {
+                    supporting.add(segAgent)
+                }
+            }
+        }
+        if (structured.subIntents.size > 1) {
+            structured.subIntents.drop(1).forEach { subIntent ->
+                val subAgent = when (subIntent) {
+                    CanonicalIntent.KNOWLEDGE_FAST, CanonicalIntent.KNOWLEDGE_DEEP_RESEARCH -> AiAgentRegistry.INTELLIGENT_AGENT
+                    CanonicalIntent.COMMUNICATION_CALL, CanonicalIntent.COMMUNICATION_SMS, CanonicalIntent.COMMUNICATION_WHATSAPP -> AiAgentRegistry.COMMUNICATION_AGENT
+                    CanonicalIntent.AUTOMATION_UI -> AiAgentRegistry.AUTOMATION_AGENT
+                    CanonicalIntent.SCREEN_VISION -> AiAgentRegistry.VISION_AGENT
+                    CanonicalIntent.NOTIFICATION_INTEL -> AiAgentRegistry.NOTIFICATION_AGENT
+                    CanonicalIntent.MEMORY_MANAGE -> AiAgentRegistry.MEMORY_AGENT
+                    CanonicalIntent.TASK_SCHEDULE -> AiAgentRegistry.TASK_AGENT
+                    CanonicalIntent.DEVICE_CONTROL, CanonicalIntent.APP_LAUNCH, CanonicalIntent.NAVIGATION_ROUTE -> AiAgentRegistry.EDITH_AGENT
+                    CanonicalIntent.HOME_DEV -> AiAgentRegistry.HOME_DEVELOPER
+                    else -> null
+                }
+                if (subAgent != null && subAgent.id != primarySpecialist.id && subAgent.id != AiAgentRegistry.JARVIS_MASTER.id && subAgent !in supporting) {
+                    supporting.add(subAgent)
+                }
+            }
+        }
+        return AgentSelectionResult(
+            controllerAgent = AiAgentRegistry.JARVIS_MASTER,
+            primarySpecialistAgent = primarySpecialist,
+            supportingAgents = supporting,
+            intentType = structured.primaryIntent,
+            rationaleBn = "সেন্ট্রাল কন্ট্রোলার JARVIS_MASTER '${primarySpecialist.titleBengali}'-কে প্রাইমারি স্পেশালিস্ট হিসেবে নির্বাচিত করেছে।"
+        )
     }
 
     /**
      * Splits compound multi-step commands ("আগে X করো তারপর Y করো" / "and then") into bounded subtasks.
      */
     fun decomposeGoal(utterance: String): List<String> {
-        val cleaned = utterance.trim()
-        if (cleaned.isBlank()) return emptyList()
-
-        val splitRegex = Regex("""\s*(?:,|;|তারপর|এরপর|এবং তারপর|আগে\b.*?\bতারপর|and then|then)\s*""", RegexOption.IGNORE_CASE)
-        val rawParts = cleaned
-            .replace(Regex("""^(আগে|প্রথমে)\s+""", RegexOption.IGNORE_CASE), "")
-            .split(splitRegex)
-            .map { it.trim() }
-            .filter { it.isNotBlank() }
-
-        return if (rawParts.size > 1) {
-            rawParts.take(MAX_SUBTASKS)
-        } else {
-            listOf(cleaned)
-        }
+        return UnifiedBrainLanguageEngine.splitCompoundCommands(utterance).take(MAX_SUBTASKS)
     }
 
     fun buildPlan(
@@ -207,7 +290,8 @@ object JarvisMasterOrchestrator {
     ): MasterExecutionPlan {
         val emotionEval = EmotionContextEngine.analyzeText(utterance)
         val personality = JarvisPersonalityManager.currentMode.value
-        val parts = if (toolNameOverride != null) listOf(utterance) else decomposeGoal(utterance)
+        val structured = UnifiedBrainLanguageEngine.analyze(utterance, updateReferenceContext = false)
+        val parts = if (toolNameOverride != null) listOf(utterance) else decomposeGoal(structured.resolvedQuery)
 
         val subTasks = parts.mapIndexed { idx, part ->
             val resolved = if (toolNameOverride != null) {
@@ -244,7 +328,17 @@ object JarvisMasterOrchestrator {
             spec != null && spec.confirmationLevel != ConfirmationLevel.NONE
         }
 
-        val primary = subTasks.firstOrNull()?.assignedAgent ?: AiAgentRegistry.JARVIS_MASTER
+        val selection = selectAgentsWithMasterHierarchy(utterance, subTasks.firstOrNull()?.toolName ?: toolNameOverride)
+        val primary = subTasks.firstOrNull()?.assignedAgent ?: selection.primarySpecialistAgent
+        val execMode = when (structured.primaryIntent) {
+            CanonicalIntent.KNOWLEDGE_FAST -> "FAST_KNOWLEDGE"
+            CanonicalIntent.KNOWLEDGE_DEEP_RESEARCH -> "DEEP_RESEARCH"
+            else -> if (subTasks.size > 1) "MULTI_STEP_SERIAL" else "STANDARD"
+        }
+        val dependencies = if (subTasks.size > 1) {
+            subTasks.zipWithNext().map { (a, b) -> "step_${a.stepIndex}->step_${b.stepIndex}" }
+        } else emptyList()
+
         val plan = MasterExecutionPlan(
             goal = utterance.trim(),
             primaryAgent = primary,
@@ -252,7 +346,15 @@ object JarvisMasterOrchestrator {
             riskLevel = highestRisk,
             requiresConfirmation = needsConf,
             personalityMode = personality,
-            detectedEmotion = emotionEval.emotion
+            detectedEmotion = emotionEval.emotion,
+            controllerAgent = AiAgentRegistry.JARVIS_MASTER,
+            primarySpecialistAgent = primary,
+            supportingAgents = selection.supportingAgents,
+            intentType = structured.primaryIntent,
+            executionMode = execMode,
+            dependencies = dependencies,
+            retryPolicy = if (highestRisk.ordinal >= RiskLevel.EXTERNAL_COMM.ordinal) "NO_BLIND_RETRY" else "BOUNDED_2",
+            timeoutPolicy = if (execMode == "DEEP_RESEARCH") "12S_BOUNDED_PARALLEL" else "45S"
         )
         _activePlan.value = plan
         _selectedSpecialist.value = primary

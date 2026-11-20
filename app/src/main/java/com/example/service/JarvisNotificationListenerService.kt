@@ -225,6 +225,66 @@ class JarvisNotificationListenerService : NotificationListenerService() {
             }
         }
 
+        fun verifyMediaPlaybackState(context: Context, packageHint: String = "youtube"): Triple<Boolean, String, String?> {
+            return try {
+                val service = instance
+                    ?: return Triple(false, "NOTIFICATION_LISTENER_REQUIRED", null)
+                val sessionManager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
+                    ?: return Triple(false, "MEDIA_SESSION_UNAVAILABLE", null)
+                val component = ComponentName(service, JarvisNotificationListenerService::class.java)
+                val controllers = sessionManager.getActiveSessions(component)
+                val target = controllers.firstOrNull {
+                    it.packageName.contains(packageHint, ignoreCase = true)
+                } ?: controllers.firstOrNull()
+                if (target == null) {
+                    return Triple(false, "NO_ACTIVE_MEDIA_SESSION", null)
+                }
+                val isPlaying = target.playbackState?.state == android.media.session.PlaybackState.STATE_PLAYING
+                val title = target.metadata?.getString(android.media.MediaMetadata.METADATA_KEY_TITLE)
+                val label = if (isPlaying) "PLAYING" else "PAUSED_OR_BUFFERING"
+                Triple(isPlaying, label, title)
+            } catch (_: Exception) {
+                Triple(false, "VERIFICATION_UNAVAILABLE", null)
+            }
+        }
+
+        data class YouTubeNotificationSplit(
+            val systemPushNotifications: List<EnhancedNotification>,
+            val activeVideoTitle: String?,
+            val isMediaPlaying: Boolean,
+            val playbackStateLabel: String,
+            val inAppInboxHonestNote: String,
+            val summaryBengali: String
+        )
+
+        fun getYouTubeNotificationSplit(context: Context): YouTubeNotificationSplit {
+            val ytPush = _recentNotifications.value.filter {
+                it.packageName.contains("youtube", ignoreCase = true)
+            }
+            val (playing, stateLabel, activeTitle) = verifyMediaPlaybackState(context, "youtube")
+            val note = "Android NotificationListener কেবল সিস্টেম পুশ নোটিফিকেশন ও MediaSession ডেটা পড়তে পারে; ইউটিউব অ্যাপের ভেতরের ইন-অ্যাপ নোটিফিকেশন ইনবক্স কেবল অ্যাপ খোলা অবস্থায় স্ক্রিন/অ্যাক্সেসিবিলিটি দিয়ে দেখা যায়।"
+            val summary = buildString {
+                if (ytPush.isNotEmpty()) {
+                    append("ইউটিউব পুশ নোটিফিকেশন (${ytPush.size}টি): ")
+                    append(ytPush.take(5).joinToString("; ") { "${it.sender}: ${it.text}" })
+                } else {
+                    append("কোনো ইউটিউব সিস্টেম পুশ নোটিফিকেশন নেই।")
+                }
+                if (!activeTitle.isNullOrBlank()) {
+                    append("\nসক্রিয় মিডিয়া: $activeTitle ($stateLabel)")
+                }
+                append("\n$note")
+            }
+            return YouTubeNotificationSplit(
+                systemPushNotifications = ytPush,
+                activeVideoTitle = activeTitle,
+                isMediaPlaying = playing,
+                playbackStateLabel = stateLabel,
+                inAppInboxHonestNote = note,
+                summaryBengali = summary
+            )
+        }
+
         private fun isSensitiveOtpContent(title: String, text: String): Boolean {
             val combined = "$title $text".lowercase(Locale.ROOT)
             val otpKeywords = listOf("otp", "one time password", "verification code", "ভেরিফিকেশন", "কোড", "pin", "বিকাশ পিন", "নগদ পিন", "bank otp", "security code", "auth code")

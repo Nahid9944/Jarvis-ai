@@ -30,11 +30,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class JarvisOfflineKeywordSpotter(
     private val context: Context,
-    private val onWakeWordTriggered: (keyword: String) -> Unit
+    private val onWakeWordTriggered: (matchedPhrase: String, remainderCommand: String) -> Unit
 ) {
 
     private val isSpottingActive = AtomicBoolean(false)
     private val isPausedForLiveMic = AtomicBoolean(false)
+    private val generation = java.util.concurrent.atomic.AtomicLong(0L)
     private var speechRecognizer: SpeechRecognizer? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -78,6 +79,11 @@ class JarvisOfflineKeywordSpotter(
             return
         }
 
+        if (com.example.service.JarvisWakeWordService.isRunning.value) {
+            Log.d(TAG, "JarvisWakeWordService already handles wake listening; skipping duplicate OfflineKeywordSpotter.")
+            return
+        }
+
         if (isPausedForLiveMic.get() || GeminiLiveAnnouncementAdapter.isInActiveCall.value) {
             Log.d(TAG, "Deferring wake-word start because live mic or phone call holds audio focus.")
             isSpottingActive.set(true)
@@ -87,10 +93,10 @@ class JarvisOfflineKeywordSpotter(
         if (isSpottingActive.compareAndSet(false, true)) {
             _isListening.value = true
             Log.i(TAG, "J.A.R.V.I.S. Offline Keyword Spotter started.")
-            startOfflineSpeechDetection()
+            startOfflineSpeechDetection(generation.incrementAndGet())
         } else if (!_isListening.value) {
             _isListening.value = true
-            startOfflineSpeechDetection()
+            startOfflineSpeechDetection(generation.incrementAndGet())
         }
     }
 
@@ -98,27 +104,35 @@ class JarvisOfflineKeywordSpotter(
      * Yields hardware microphone when Gemini Live AudioInputStreamer or an active phone call takes over.
      */
     fun pauseForLiveMic(reason: String = "live_session") {
+        generation.incrementAndGet()
         isPausedForLiveMic.set(true)
         _isListening.value = false
         _audioRmsEnergy.value = 0f
         com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.OFFLINE_SPOTTER)
+        mainHandler.removeCallbacksAndMessages(null)
         mainHandler.post {
-            mainHandler.removeCallbacksAndMessages(null)
             destroyRecognizerOnMain()
         }
         Log.d(TAG, "Paused offline keyword spotter ($reason) to prevent microphone contention.")
     }
 
     /**
-     * Resumes wake-word spotting only if user wants spotting active and no active call holds the mic.
+     * Resumes wake-word spotting only if user wants spotting active and no active call or foreground wake service holds the mic.
      */
     fun resumeAfterLiveMic(reason: String = "live_session_ended") {
         if (!isPausedForLiveMic.compareAndSet(true, false)) return
+        if (com.example.service.JarvisWakeWordService.isRunning.value) {
+            Log.d(TAG, "Resume skipped: JarvisWakeWordService manages wake listening.")
+            return
+        }
         if (isSpottingActive.get() && !GeminiLiveAnnouncementAdapter.isInActiveCall.value) {
+            val token = generation.incrementAndGet()
             _isListening.value = true
             mainHandler.postDelayed({
-                if (isSpottingActive.get() && !isPausedForLiveMic.get()) {
-                    startOfflineSpeechDetection()
+                if (token == generation.get() && isSpottingActive.get() && !isPausedForLiveMic.get() &&
+                    !com.example.service.JarvisWakeWordService.isRunning.value
+                ) {
+                    startOfflineSpeechDetection(token)
                 }
             }, 350)
             Log.d(TAG, "Resumed offline keyword spotter ($reason).")
@@ -126,13 +140,14 @@ class JarvisOfflineKeywordSpotter(
     }
 
     fun stopListening() {
+        generation.incrementAndGet()
         isSpottingActive.set(false)
         isPausedForLiveMic.set(false)
         _isListening.value = false
         _audioRmsEnergy.value = 0f
         com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.OFFLINE_SPOTTER)
+        mainHandler.removeCallbacksAndMessages(null)
         mainHandler.post {
-            mainHandler.removeCallbacksAndMessages(null)
             destroyRecognizerOnMain()
         }
         Log.i(TAG, "J.A.R.V.I.S. Offline Keyword Spotter stopped.")
@@ -150,10 +165,16 @@ class JarvisOfflineKeywordSpotter(
         }
     }
 
-    private fun startOfflineSpeechDetection() {
+    private fun startOfflineSpeechDetection(expectedGeneration: Long = generation.get()) {
         mainHandler.post {
-            if (!isSpottingActive.get() || isPausedForLiveMic.get() || GeminiLiveAnnouncementAdapter.isInActiveCall.value) {
+            if (expectedGeneration != generation.get() ||
+                !isSpottingActive.get() ||
+                isPausedForLiveMic.get() ||
+                GeminiLiveAnnouncementAdapter.isInActiveCall.value ||
+                com.example.service.JarvisWakeWordService.isRunning.value
+            ) {
                 _isListening.value = false
+                com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.OFFLINE_SPOTTER)
                 return@post
             }
 
@@ -174,6 +195,16 @@ class JarvisOfflineKeywordSpotter(
                     speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
                 }
 
+                val prefLang = try {
+                    AiSettingsRepository(context).settingsState.value.preferredLanguage
+                } catch (_: Exception) {
+                    "bn"
+                }
+                val recognitionLocale = when (prefLang) {
+                    "en" -> "en-US"
+                    "bn" -> "bn-BD"
+                    else -> Locale.getDefault().toLanguageTag()
+                }
                 val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                     putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
@@ -181,7 +212,7 @@ class JarvisOfflineKeywordSpotter(
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
                     }
-                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault().toLanguageTag())
+                    putExtra(RecognizerIntent.EXTRA_LANGUAGE, recognitionLocale)
                 }
 
                 speechRecognizer?.setRecognitionListener(object : RecognitionListener {
@@ -191,27 +222,57 @@ class JarvisOfflineKeywordSpotter(
                         _audioRmsEnergy.value = ((rmsdB + 2f) * 8f).coerceIn(0f, 100f)
                     }
                     override fun onBufferReceived(buffer: ByteArray?) {}
-                    override fun onEndOfSpeech() {}
+                    override fun onEndOfSpeech() {
+                        _isListening.value = false
+                        _audioRmsEnergy.value = 0f
+                    }
 
                     override fun onError(error: Int) {
-                        if (isSpottingActive.get() && !isPausedForLiveMic.get() && !GeminiLiveAnnouncementAdapter.isInActiveCall.value) {
+                        _isListening.value = false
+                        _audioRmsEnergy.value = 0f
+                        com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.OFFLINE_SPOTTER)
+                        if (expectedGeneration == generation.get() &&
+                            isSpottingActive.get() &&
+                            !isPausedForLiveMic.get() &&
+                            !GeminiLiveAnnouncementAdapter.isInActiveCall.value &&
+                            !com.example.service.JarvisWakeWordService.isRunning.value
+                        ) {
                             mainHandler.postDelayed({
-                                if (isSpottingActive.get() && !isPausedForLiveMic.get()) {
-                                    startOfflineSpeechDetection()
+                                if (expectedGeneration == generation.get() &&
+                                    isSpottingActive.get() &&
+                                    !isPausedForLiveMic.get() &&
+                                    !com.example.service.JarvisWakeWordService.isRunning.value
+                                ) {
+                                    _isListening.value = true
+                                    startOfflineSpeechDetection(expectedGeneration)
                                 }
                             }, 500)
                         }
                     }
 
                     override fun onResults(results: Bundle?) {
+                        _isListening.value = false
+                        com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.OFFLINE_SPOTTER)
                         val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                         matches?.forEach { candidate ->
                             checkAndMatchCandidate(candidate, confidence = 0.95f)
                         }
 
-                        if (isSpottingActive.get() && !isPausedForLiveMic.get() && !GeminiLiveAnnouncementAdapter.isInActiveCall.value) {
+                        if (expectedGeneration == generation.get() &&
+                            isSpottingActive.get() &&
+                            !isPausedForLiveMic.get() &&
+                            !GeminiLiveAnnouncementAdapter.isInActiveCall.value &&
+                            !com.example.service.JarvisWakeWordService.isRunning.value
+                        ) {
                             mainHandler.postDelayed({
-                                if (isSpottingActive.get() && !isPausedForLiveMic.get()) startOfflineSpeechDetection()
+                                if (expectedGeneration == generation.get() &&
+                                    isSpottingActive.get() &&
+                                    !isPausedForLiveMic.get() &&
+                                    !com.example.service.JarvisWakeWordService.isRunning.value
+                                ) {
+                                    _isListening.value = true
+                                    startOfflineSpeechDetection(expectedGeneration)
+                                }
                             }, 350)
                         }
                     }
@@ -226,30 +287,42 @@ class JarvisOfflineKeywordSpotter(
                     override fun onEvent(eventType: Int, params: Bundle?) {}
                 })
 
+                _isListening.value = true
                 speechRecognizer?.startListening(intent)
             } catch (e: Exception) {
                 Log.e(TAG, "SpeechRecognizer initialization failure: ${e.message}")
+                _isListening.value = false
+                com.example.audio.MicrophoneCoordinator.release(com.example.audio.MicOwner.OFFLINE_SPOTTER)
             }
         }
     }
 
     private fun checkAndMatchCandidate(candidate: String, confidence: Float) {
-        val lower = candidate.lowercase(Locale.ROOT).trim()
-        val matchedKeyword = KEYWORD_PATTERNS.find { pattern -> lower.contains(pattern) }
-        if (matchedKeyword != null) {
-            triggerWakeEvent(matchedKeyword, confidence)
+        val cooldown = com.example.audio.WakeWordModelManager.getCooldownMs(context)
+        if (!com.example.audio.OfflineWakeWordEngine.canTriggerNow(cooldownMs = cooldown)) return
+
+        val phrases = com.example.audio.WakeWordModelManager.getCustomWakePhrases(context)
+        val match = com.example.audio.OfflineWakeWordEngine.matchWakePhrase(
+            spokenText = candidate,
+            configuredPhrases = phrases,
+            sensitivity = com.example.service.JarvisWakeWordService.getSensitivity(context),
+            isPartial = confidence < 0.90f
+        )
+        if (match.matched) {
+            com.example.audio.OfflineWakeWordEngine.markTriggered()
+            triggerWakeEvent(match.matchedPhrase, match.remainderCommand, match.confidence)
         }
     }
 
-    private fun triggerWakeEvent(keyword: String, confidence: Float) {
-        Log.i(TAG, "Wake word detected: '$keyword' (Confidence: $confidence)")
-        _lastDetectedKeyword.value = keyword
+    private fun triggerWakeEvent(matchedPhrase: String, remainderCommand: String, confidence: Float) {
+        Log.i(TAG, "Wake word detected: '$matchedPhrase' (Confidence: $confidence)")
+        _lastDetectedKeyword.value = matchedPhrase
         _detectionConfidence.value = confidence
 
         provideHapticPulse()
 
         mainHandler.post {
-            onWakeWordTriggered(keyword)
+            onWakeWordTriggered(matchedPhrase, remainderCommand.trim())
         }
     }
 

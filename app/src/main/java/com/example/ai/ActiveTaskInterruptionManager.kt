@@ -107,7 +107,7 @@ object ActiveTaskInterruptionManager {
      * Parses natural language utterances during assistant speaking or task execution.
      */
     fun classifyInterruptionIntent(utterance: String): InterruptionIntent {
-        val lower = utterance.trim().lowercase(Locale.ROOT)
+        val lower = java.text.Normalizer.normalize(utterance.trim(), java.text.Normalizer.Form.NFC).lowercase(Locale.ROOT)
 
         return when {
             // Emergency stop
@@ -117,12 +117,12 @@ object ActiveTaskInterruptionManager {
 
             // Stop speech only
             lower.contains("কথা থামাও") || lower.contains("চুপ করো") || lower.contains("কথা বন্ধ") ||
-            lower.contains("কাজ চালিয়ে যাও") || lower.contains("stop speaking") || lower.contains("be quiet") -> {
+            lower.contains("কাজ চালিয়ে যাও") || lower.contains("stop speaking") || lower.contains("be quiet") -> {
                 InterruptionIntent.STOP_SPEECH_ONLY
             }
 
             // Pause task
-            lower.contains("একটু দাঁড়াও") || lower.contains("একটু অপেক্ষা করো") || lower.contains("পজ করো") ||
+            lower.contains("একটু দাঁড়াও") || lower.contains("একটু অপেক্ষা করো") || lower.contains("পজ করো") ||
             lower.contains("থামো একটু") || lower.contains("hold on") || lower.contains("wait a minute") || lower.contains("pause") -> {
                 InterruptionIntent.PAUSE_CURRENT_TASK
             }
@@ -131,7 +131,8 @@ object ActiveTaskInterruptionManager {
             lower.contains("কাজটা বন্ধ করো") || lower.contains("কাজ বন্ধ করো") || lower.contains("থামো") ||
             lower.contains("cancel করো") || lower.contains("বাতিল করো") || lower.contains("আর এগিও না") ||
             lower.contains("ফোন দিও না") || lower.contains("আগের কাজ বাদ দাও") || lower.contains("cancel task") ||
-            lower.contains("stop task") || lower.contains("করো না") -> {
+            lower.contains("stop task") || lower.contains("stop koro") || lower.contains("stop all") ||
+            lower.contains("sob kaj") || lower.contains("করো না") -> {
                 InterruptionIntent.CANCEL_CURRENT_TASK
             }
 
@@ -148,13 +149,13 @@ object ActiveTaskInterruptionManager {
             }
 
             // Resume task
-            lower.contains("আবার শুরু করো") || lower.contains("চালিয়ে যাও") || lower.contains("রিজিউম করো") ||
+            lower.contains("আবার শুরু করো") || lower.contains("চালিয়ে যাও") || lower.contains("রিজিউম করো") ||
             lower.contains("resume") || lower.contains("continue") -> {
                 InterruptionIntent.RESUME_TASK
             }
 
             // Ask new question (e.g. "এক মিনিট, ফোনে কত চার্জ আছে?")
-            lower.contains("কত চার্জ") || lower.contains("কয়টা বাজে") || lower.contains("আবহাওয়া কেমন") ||
+            lower.contains("কত চার্জ") || lower.contains("কয়টা বাজে") || lower.contains("আবহাওয়া কেমন") ||
             lower.contains("প্রশ্নের উত্তর দাও") || lower.contains("tell me") || lower.contains("what is") -> {
                 InterruptionIntent.ASK_NEW_QUESTION
             }

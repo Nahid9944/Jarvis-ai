@@ -207,7 +207,7 @@ fun JarvisAgentsTab(
                             ) {
                                 Icon(Icons.Default.Hub, contentDescription = null, tint = DashEmerald, modifier = Modifier.size(18.dp))
                                 Text(
-                                    text = "১২টি স্পেশালাইজড এজেন্ট ওয়ার্কফ্লো",
+                                    text = "${AiAgentRegistry.ALL_AGENTS.size}টি স্পেশালাইজড এজেন্ট ওয়ার্কফ্লো",
                                     fontSize = 13.5.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = DashText

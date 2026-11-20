@@ -15,9 +15,12 @@ class PermissionOrchestratorTest {
     }
 
     @Test
-    fun permissionRegistry_hasExactly26Specs() {
+    fun permissionRegistry_hasExactly24PlayCompliantSpecs() {
         val specs = PermissionRegistry.getAll()
-        assertEquals("Permission registry must have exactly 26 specs", 26, specs.size)
+        assertEquals("Permission registry must have exactly 24 Play-compliant specs", 24, specs.size)
+        val perms = specs.flatMap { it.androidPermissions }
+        assertFalse(perms.contains("android.permission.READ_EXTERNAL_STORAGE"))
+        assertFalse(perms.contains("android.permission.READ_MEDIA_IMAGES"))
     }
 
     @Test

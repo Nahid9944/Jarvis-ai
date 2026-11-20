@@ -358,6 +358,8 @@ class NahidV10UpgradeUnitTest {
     @Test
     fun masterOrchestrator_routesLiveToolsUpdatesSpecialistAndPreventsRedundantExecution() = runBlocking {
         org.robolectric.Shadows.shadowOf(app).grantPermissions(android.Manifest.permission.CAMERA)
+        val bm = app.getSystemService(Context.BATTERY_SERVICE) as android.os.BatteryManager
+        org.robolectric.Shadows.shadowOf(bm).setIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY, 82)
         val dao = AssistantDatabase.getDatabase(app).assistantDao()
         val executor = AssistantToolExecutor(dao = dao, onNavigate = {}, context = app)
 

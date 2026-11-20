@@ -252,4 +252,83 @@ class AssistantDatabaseMigrationTest {
         dao.deleteArtifact(newId)
         assertNull(dao.getArtifactByIdSync(newId))
     }
+
+    @Test
+    fun migration21To22_preservesDataAndEnablesKnowledgeCacheAndTelemetry() = runBlocking {
+        val dbFile = app.getDatabasePath(DatabaseMigrationHelper.NEW_DB_NAME)
+        dbFile.parentFile?.mkdirs()
+
+        val tempDb = Room.databaseBuilder(app, AssistantDatabase::class.java, "schema_seed_temp.db")
+            .allowMainThreadQueries()
+            .build()
+        val v22Excluded = setOf("knowledge_cache", "knowledge_telemetry")
+        val v21Ddl = mutableListOf<String>()
+        tempDb.openHelper.writableDatabase.query(
+            "SELECT tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'room_%' AND name != 'android_metadata'"
+        ).use { c ->
+            while (c.moveToNext()) {
+                val tblName = c.getString(0)
+                val sql = c.getString(1)
+                if (tblName !in v22Excluded && !sql.isNullOrBlank()) {
+                    v21Ddl.add(sql)
+                }
+            }
+        }
+        tempDb.close()
+        app.deleteDatabase("schema_seed_temp.db")
+
+        SQLiteDatabase.openOrCreateDatabase(dbFile, null).use { sqlite ->
+            v21Ddl.forEach { sql -> sqlite.execSQL(sql) }
+            sqlite.execSQL(
+                """
+                INSERT INTO ai_memories (key, content, category, importance, createdAt, updatedAt, source, isPinned, isActive)
+                VALUES ('v21_pref', 'Prefer verified Bangla answers', 'PREFERENCE', 3, 1000, 1000, 'USER', 1, 1)
+                """.trimIndent()
+            )
+            sqlite.version = 21
+        }
+
+        val upgradedDb = AssistantDatabase.getDatabase(app)
+        val aDao = upgradedDb.assistantDao()
+        val kDao = upgradedDb.knowledgeDao()
+
+        val memories = aDao.getAllActiveMemoriesSync()
+        assertEquals(1, memories.size)
+        assertEquals("v21_pref", memories.first().key)
+
+        val now = System.currentTimeMillis()
+        kDao.upsertCache(
+            com.example.data.local.KnowledgeCacheEntity(
+                cacheKey = "k_v22_test",
+                normalizedQuery = "বাংলাদেশের রাজধানী",
+                topicCategory = "GENERAL",
+                answerSummaryBn = "বাংলাদেশের রাজধানী ঢাকা।",
+                verificationStatus = "VERIFIED",
+                storageState = "SAVED",
+                sourceTier = "L2",
+                createdAt = now,
+                expiresAt = now + 60_000L,
+                lastAccessedAt = now
+            )
+        )
+        val cached = kDao.getCacheByKey("k_v22_test")
+        assertNotNull(cached)
+        assertEquals("SAVED", cached!!.storageState)
+
+        val rowId = kDao.insertTelemetry(
+            com.example.data.local.KnowledgeTelemetryEntity(
+                query = "বাংলাদেশের রাজধানী",
+                mode = "FAST_RETRIEVAL",
+                cacheTierReached = "L2",
+                firstResponseMs = 12L,
+                totalLatencyMs = 14L,
+                bytesTransferred = 0L,
+                sourceCount = 2,
+                verifiedClaimCount = 1,
+                storageState = "SAVED"
+            )
+        )
+        assertTrue(rowId > 0L)
+        assertEquals(1, kDao.getRecentTelemetrySync(10).size)
+    }
 }

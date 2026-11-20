@@ -4,10 +4,15 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.*
+import com.example.audio.AssistantVoiceHudState
+import com.example.audio.HandsFreeSessionController
+import com.example.audio.WakeWordModelManager
 import com.example.automation.JarvisSkillRecorder
 import com.example.data.local.*
 import com.example.data.repository.*
 import com.example.permissions.*
+import com.example.service.JarvisAssistantRoleManager
+import com.example.service.JarvisWakeWordService
 import com.example.ui.components.OrbVisualState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
@@ -25,6 +30,23 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val aiSettingsRepo = AiSettingsRepository(application.applicationContext)
     val jarvisMemoryRepo = JarvisMemoryRepository(dao, db.jarvisMemoryDao())
     val jarvisSkillRepo = JarvisSkillRepository(db.jarvisSkillDao())
+    val homeDevDao = db.homeDeveloperDao()
+    val homeDevSettingsRepo = com.example.developer.HomeDeveloperSettingsRepository(application.applicationContext)
+    val homeDevSettings: StateFlow<com.example.developer.HomeDeveloperSettingsState> = homeDevSettingsRepo.settings
+    val homeDevState: StateFlow<com.example.developer.HomeDeveloperLiveState> = com.example.developer.HomeDeveloperOrchestrator.devState
+    val devTasks: StateFlow<List<DevTaskEntity>> = homeDevDao.getAllDevTasks()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val devActivityLogs: StateFlow<List<DevActivityLogEntity>> = homeDevDao.getRecentActivityLogs(100)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val devPatches: StateFlow<List<DevPatchHistoryEntity>> = homeDevDao.getAllPatches()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val capabilityGaps: StateFlow<List<CapabilityGapEntity>> = homeDevDao.getAllCapabilityGaps()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val skillEvidences: StateFlow<List<SkillEvidenceEntity>> = homeDevDao.getAllSkillEvidence()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    val knowledgeSystemStatus: StateFlow<com.example.knowledge.KnowledgeSystemLiveStatus> =
+        com.example.knowledge.IntelligentKnowledgeRouter.liveStatus
+
     val skillRecorder = JarvisSkillRecorder(viewModelScope)
     val allLearnedSkills: StateFlow<List<JarvisSkillEntity>> = jarvisSkillRepo.allSkills
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -451,6 +473,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     private val _navigationCommand = MutableSharedFlow<String>(replay = 1)
     val navigationCommand: SharedFlow<String> = _navigationCommand.asSharedFlow()
 
+    private val _requestedHudTab = MutableStateFlow<Int?>(null)
+    val requestedHudTab: StateFlow<Int?> = _requestedHudTab.asStateFlow()
+
+    fun openHudTab(tabIndex: Int) {
+        _requestedHudTab.value = tabIndex
+        _navigationCommand.tryEmit("hud")
+    }
+
+    fun consumeRequestedHudTab() {
+        _requestedHudTab.value = null
+    }
+
     fun navigateTo(screen: String) {
         _navigationCommand.tryEmit(screen)
     }
@@ -499,8 +533,18 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             } else {
                 offlineKeywordSpotter.resumeAfterLiveMic("live_${state.name}")
             }
+            HandsFreeSessionController.syncFromLiveSession(
+                liveState = state,
+                isWakeWordRunning = JarvisWakeWordService.isRunning.value || WakeWordModelManager.optInEnabled.value,
+                isPaused = JarvisWakeWordService.isPausedState.value || ActiveTaskInterruptionManager.currentTask.value?.status == TaskStatus.PAUSED,
+                hasPermissionPending = JarvisPermissionManager.pendingOsAction.value != null,
+                hasApprovalPending = ActionApprovalRegistry.pendingApproval.value != null,
+                isOnline = state != LiveSessionState.ERROR
+            )
         }
     )
+
+    val voiceHudState: StateFlow<AssistantVoiceHudState> = HandsFreeSessionController.hudState
 
     val liveInputTranscript: StateFlow<String> = liveSessionManager.latestInputTranscript
     val liveOutputTranscript: StateFlow<String> = liveSessionManager.latestOutputTranscript
@@ -650,6 +694,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val lastEmergencyStopReport = com.example.util.JarvisEmergencyStopCoordinator.lastReport
 
     init {
+        WakeWordModelManager.init(application.applicationContext)
         val companionDao = db.companionDao()
         ActionApprovalRegistry.attachDao(companionDao)
         JarvisPersonalityManager.init(application.applicationContext)
@@ -657,7 +702,41 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         EmotionContextEngine.attachDao(companionDao)
         com.example.util.JarvisEmergencyStopCoordinator.registerRuntimeHooks(
             onStopLiveSession = { liveSessionManager.stopSession() },
-            onStopOfflineSpotter = { offlineKeywordSpotter.stopListening() }
+            onStopOfflineSpotter = {
+                offlineKeywordSpotter.stopListening()
+                JarvisWakeWordService.stop(application.applicationContext)
+            }
+        )
+        HandsFreeSessionController.registerSpotterHooks(
+            onPauseSpotter = { offlineKeywordSpotter.pauseForLiveMic("hands_free_wake") },
+            onResumeSpotter = {
+                if (_wakeWordOptIn.value && !JarvisWakeWordService.isRunning.value) {
+                    offlineKeywordSpotter.resumeAfterLiveMic("live_session_ended")
+                }
+            }
+        )
+        com.example.service.JarvisBackgroundService.registerRuntimeHooks(
+            onPause = {
+                liveSessionManager.stopMicStreaming()
+                offlineKeywordSpotter.pauseForLiveMic("background_notification_pause")
+                if (JarvisWakeWordService.isRunning.value) {
+                    JarvisWakeWordService.pause(application.applicationContext)
+                }
+            },
+            onResume = {
+                if (_aiLiveState.value == LiveSessionState.CONNECTED ||
+                    _aiLiveState.value == LiveSessionState.LISTENING ||
+                    _aiLiveState.value == LiveSessionState.SPEAKING
+                ) {
+                    startMicStreaming()
+                } else if (_wakeWordOptIn.value) {
+                    if (JarvisWakeWordService.isRunning.value) {
+                        JarvisWakeWordService.resume(application.applicationContext)
+                    } else {
+                        offlineKeywordSpotter.resumeAfterLiveMic("background_notification_resume")
+                    }
+                }
+            }
         )
         com.example.service.GeminiLiveAnnouncementAdapter.setLiveSessionReady(false) { announcementText ->
             if (_aiLiveState.value == LiveSessionState.CONNECTED ||
@@ -722,8 +801,42 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun stopLiveSession() {
         liveSessionManager.stopSession()
+        HandsFreeSessionController.onLiveSessionEnded(getApplication())
         offlineKeywordSpotter.resumeAfterLiveMic("session_stopped")
     }
+
+    private val _wakeInlineCommands = kotlinx.coroutines.flow.MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val wakeInlineCommands: SharedFlow<String> = _wakeInlineCommands.asSharedFlow()
+
+    fun dispatchWakeInlineCommand(command: String) {
+        val clean = command.trim()
+        if (clean.isNotBlank()) {
+            _wakeInlineCommands.tryEmit(clean)
+        }
+    }
+
+    fun handleWakeWordTrigger(
+        matchedPhrase: String,
+        remainderCommand: String,
+        onExecuteInline: (String) -> Unit
+    ) {
+        HandsFreeSessionController.onWakeWordDetected(
+            context = getApplication(),
+            matchedPhrase = matchedPhrase,
+            remainderCommand = remainderCommand
+        ) { inlineCmd ->
+            if (_aiLiveState.value == LiveSessionState.DISCONNECTED || _aiLiveState.value == LiveSessionState.ERROR) {
+                startLiveSession()
+                startMicStreaming()
+            }
+            if (inlineCmd.isNotBlank()) {
+                onExecuteInline(inlineCmd)
+            }
+        }
+    }
+
+    fun getWakeWordCapabilityReport() = WakeWordModelManager.inspectCapabilities(getApplication())
+    fun getAssistantRoleStatus() = JarvisAssistantRoleManager.getStatus(getApplication())
 
     fun sendAiImageFrame(base64Jpeg: String) {
         liveSessionManager.sendImageFrame(base64Jpeg)
@@ -1005,6 +1118,24 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    fun learnFromTextWorkspace(
+        instructionText: String,
+        title: String = "",
+        dryRunOnly: Boolean = false,
+        onDone: (org.json.JSONObject) -> Unit
+    ) {
+        viewModelScope.launch {
+            val res = com.example.automation.TextLearningEngine.learnFromText(
+                context = getApplication(),
+                instructionText = instructionText,
+                title = title,
+                dryRunOnly = dryRunOnly,
+                skillRepoOverride = jarvisSkillRepo
+            )
+            onDone(res)
+        }
+    }
+
     fun updateAiSettings(newSettings: AiSettingsState) {
         aiSettingsRepo.saveSettings(
             apiKey = newSettings.apiKey,
@@ -1015,7 +1146,15 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
             voiceVolumeLevel = newSettings.voiceVolumeLevel,
             authMode = newSettings.authMode,
             ephemeralToken = newSettings.ephemeralToken,
-            proxyEndpoint = newSettings.proxyEndpoint
+            proxyEndpoint = newSettings.proxyEndpoint,
+            braveSearchApiKey = newSettings.braveSearchApiKey,
+            tavilySearchApiKey = newSettings.tavilySearchApiKey,
+            githubToken = newSettings.githubToken,
+            preferredLanguage = newSettings.preferredLanguage,
+            offlineTtsEnabled = newSettings.offlineTtsEnabled,
+            ttsSpeechRate = newSettings.ttsSpeechRate,
+            silentMode = newSettings.silentMode,
+            speakingStyle = newSettings.speakingStyle
         )
         liveSessionManager.updateActiveSessionOrReconnect(aiSettingsRepo.settingsState.value)
     }
@@ -1109,45 +1248,54 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    private val _wakeWordOptIn = MutableStateFlow(authPrefs.getBoolean("wake_word_opt_in", false))
+    private val _wakeWordOptIn = MutableStateFlow(
+        authPrefs.getBoolean("wake_word_opt_in", false) || WakeWordModelManager.isOptInEnabled(application.applicationContext)
+    )
     val wakeWordOptIn: StateFlow<Boolean> = _wakeWordOptIn.asStateFlow()
 
     fun setWakeWordOptIn(enabled: Boolean) {
         authPrefs.edit().putBoolean("wake_word_opt_in", enabled).apply()
+        WakeWordModelManager.setOptInEnabled(getApplication(), enabled)
         _wakeWordOptIn.value = enabled
         viewModelScope.launch {
             jarvisMemoryRepo.savePreference("wake_word_enabled", enabled.toString(), "VOICE", "ওয়েক-ওয়ার্ড লিসেনিং অপ্ট-ইন")
         }
         if (enabled) {
             startOfflineKeywordSpotting()
+            HandsFreeSessionController.updateHudState(AssistantVoiceHudState.WAKE_WORD_ARMED)
         } else {
             stopOfflineKeywordSpotting()
+            if (_aiLiveState.value == LiveSessionState.DISCONNECTED) {
+                HandsFreeSessionController.updateHudState(AssistantVoiceHudState.IDLE)
+            }
         }
     }
 
     val offlineKeywordSpotter = JarvisOfflineKeywordSpotter(
         context = application.applicationContext,
-        onWakeWordTriggered = { keyword ->
+        onWakeWordTriggered = { matchedPhrase, remainderCommand ->
             viewModelScope.launch {
                 jarvisMemoryRepo.recordTaskExecution(
-                    taskTitle = "অফলাইন ওয়েক-ওয়ার্ড সনাক্ত: '$keyword'",
+                    taskTitle = "অফলাইন ওয়েক-ওয়ার্ড সনাক্ত: '$matchedPhrase'",
                     taskCategory = "VOICE_COMMAND",
                     triggerSource = "WAKE_WORD",
-                    rawPrompt = keyword,
+                    rawPrompt = if (remainderCommand.isNotBlank()) "$matchedPhrase $remainderCommand" else matchedPhrase,
                     structuredCommand = "wake_voice_session",
                     executionStatus = "SUCCESS",
                     resultSummary = "ভয়েস অ্যাসিস্ট্যান্ট সেশন স্বয়ংক্রিয়ভাবে সক্রিয় করা হয়েছে।"
                 )
             }
-            if (_aiLiveState.value == LiveSessionState.DISCONNECTED || _aiLiveState.value == LiveSessionState.ERROR) {
-                startLiveSession()
-                startMicStreaming()
+            handleWakeWordTrigger(
+                matchedPhrase = matchedPhrase,
+                remainderCommand = remainderCommand
+            ) { inlineCmd ->
+                dispatchWakeInlineCommand(inlineCmd)
             }
         }
     )
 
     fun startOfflineKeywordSpotting() {
-        if (_wakeWordOptIn.value) {
+        if (_wakeWordOptIn.value && !JarvisWakeWordService.isRunning.value) {
             offlineKeywordSpotter.startListening()
         }
     }
@@ -1208,8 +1356,212 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     suspend fun getEnrichedAiContext(query: String = ""): String = jarvisMemoryRepo.getEnrichedContextForAi(query)
 
+    // =========================================================================
+    // HOME DEVELOPER AGENT ACTIONS & LIVE SYNCHRONIZATION
+    // =========================================================================
+
+    fun refreshHomeDevTelemetry() {
+        viewModelScope.launch {
+            com.example.developer.HomeDeveloperOrchestrator.syncInitialStateFromDatabase(
+                context = getApplication(),
+                databaseOverride = db,
+                settingsRepoOverride = homeDevSettingsRepo
+            )
+        }
+    }
+
+    fun toggleSelfDevelopment(enabled: Boolean) {
+        val next = homeDevSettingsRepo.setSelfDevelopmentEnabled(enabled)
+        if (enabled && next.autonomyLevel == com.example.developer.AutonomyLevel.L4_SCHEDULED_BACKGROUND) {
+            com.example.developer.HomeDeveloperScheduler.scheduleBackgroundDevelopment(getApplication(), next)
+        } else if (!enabled) {
+            com.example.developer.HomeDeveloperScheduler.cancelScheduledWork(getApplication())
+        }
+        refreshHomeDevTelemetry()
+    }
+
+    fun setHomeDevAutonomyLevel(level: com.example.developer.AutonomyLevel) {
+        val next = homeDevSettingsRepo.setAutonomyLevel(level)
+        if (next.selfDevelopmentEnabled && level == com.example.developer.AutonomyLevel.L4_SCHEDULED_BACKGROUND) {
+            com.example.developer.HomeDeveloperScheduler.scheduleBackgroundDevelopment(getApplication(), next)
+        }
+        refreshHomeDevTelemetry()
+    }
+
+    fun updateHomeDevSettings(transform: (com.example.developer.HomeDeveloperSettingsState) -> com.example.developer.HomeDeveloperSettingsState) {
+        val next = homeDevSettingsRepo.update(transform)
+        if (next.selfDevelopmentEnabled && next.autonomyLevel == com.example.developer.AutonomyLevel.L4_SCHEDULED_BACKGROUND) {
+            com.example.developer.HomeDeveloperScheduler.scheduleBackgroundDevelopment(getApplication(), next)
+        } else if (!next.selfDevelopmentEnabled) {
+            com.example.developer.HomeDeveloperScheduler.cancelScheduledWork(getApplication())
+        }
+    }
+
+    fun startHomeDevGoal(
+        goal: String,
+        category: String = "FEATURE",
+        priority: String = "NORMAL",
+        sourceType: String = "TEXT",
+        sourceUrl: String = ""
+    ) {
+        viewModelScope.launch {
+            com.example.developer.HomeDeveloperOrchestrator.startTask(
+                context = getApplication(),
+                goal = goal,
+                category = category,
+                priority = priority,
+                sourceType = sourceType,
+                sourceUrl = sourceUrl,
+                databaseOverride = db,
+                settingsRepoOverride = homeDevSettingsRepo
+            )
+        }
+    }
+
+    fun pauseHomeDev(reason: String = "USER_PAUSED") {
+        viewModelScope.launch {
+            com.example.developer.HomeDeveloperOrchestrator.pauseOrStopCleanly(
+                reason = reason,
+                context = getApplication(),
+                databaseOverride = db
+            )
+        }
+    }
+
+    fun resumeHomeDev(taskId: String = "") {
+        viewModelScope.launch {
+            com.example.developer.HomeDeveloperOrchestrator.resumeFromCheckpoint(
+                taskId = taskId,
+                context = getApplication(),
+                databaseOverride = db,
+                settingsRepoOverride = homeDevSettingsRepo
+            )
+        }
+    }
+
+    fun cancelHomeDev(taskId: String = "") {
+        viewModelScope.launch {
+            com.example.developer.HomeDeveloperOrchestrator.cancelAndQuarantine(
+                taskId = taskId,
+                context = getApplication(),
+                databaseOverride = db
+            )
+        }
+    }
+
+    fun approveHomeDevTask(taskId: String) {
+        viewModelScope.launch {
+            com.example.developer.HomeDeveloperOrchestrator.approveWaitingTask(
+                taskId = taskId,
+                context = getApplication(),
+                databaseOverride = db
+            )
+        }
+    }
+
+    fun approveDraftSkillInFactory(skillId: String) {
+        viewModelScope.launch {
+            com.example.developer.UniversalSkillFactory.approveAndActivateDraftSkill(
+                skillId = skillId,
+                skillRepo = jarvisSkillRepo,
+                devDao = homeDevDao
+            )
+        }
+    }
+
+    fun approveHomeDevPatch(patchId: String) {
+        viewModelScope.launch {
+            com.example.developer.DeveloperWorkspaceEngine.approvePatch(patchId, homeDevDao)
+        }
+    }
+
+    fun rollbackHomeDevPatch(patchId: String) {
+        viewModelScope.launch {
+            com.example.developer.DeveloperWorkspaceEngine.rollbackPatch(patchId, homeDevDao, dao)
+        }
+    }
+
+    fun runCapabilityGapScan() {
+        viewModelScope.launch {
+            com.example.developer.HomeDeveloperOrchestrator.runSelfRepairAudit(
+                context = getApplication(),
+                databaseOverride = db
+            )
+        }
+    }
+
+    fun learnDocumentWorkspace(fileName: String, content: String) {
+        viewModelScope.launch {
+            com.example.developer.HomeDeveloperOrchestrator.startTask(
+                context = getApplication(),
+                goal = content,
+                category = "SKILL_LEARN",
+                sourceType = "DOCUMENT",
+                sourceUrl = fileName,
+                databaseOverride = db,
+                settingsRepoOverride = homeDevSettingsRepo
+            )
+        }
+    }
+
+    fun learnScreenshotWorkspace(observedText: String, targetApp: String) {
+        viewModelScope.launch {
+            com.example.developer.HomeDeveloperOrchestrator.startTask(
+                context = getApplication(),
+                goal = observedText,
+                category = "SKILL_LEARN",
+                sourceType = "SCREENSHOT",
+                sourceUrl = targetApp,
+                databaseOverride = db,
+                settingsRepoOverride = homeDevSettingsRepo
+            )
+        }
+    }
+
+    fun combineSkillsInFactory(skillIds: List<String>, newName: String) {
+        viewModelScope.launch {
+            com.example.developer.UniversalSkillFactory.combineSkills(
+                context = getApplication(),
+                skillIds = skillIds,
+                newSkillName = newName,
+                skillRepoOverride = jarvisSkillRepo,
+                devDaoOverride = homeDevDao
+            )
+        }
+    }
+
+    fun scheduleBackgroundDevJob(): Boolean {
+        return com.example.developer.HomeDeveloperScheduler.scheduleBackgroundDevelopment(
+            context = getApplication(),
+            settings = homeDevSettingsRepo.settings.value
+        )
+    }
+
+    fun runKnowledgeQueryFromUi(query: String, deepResearch: Boolean = false) {
+        val clean = query.trim()
+        if (clean.isBlank()) return
+        viewModelScope.launch {
+            com.example.knowledge.IntelligentKnowledgeRouter.query(
+                query = clean,
+                context = getApplication(),
+                modeOverride = if (deepResearch) {
+                    com.example.knowledge.RetrievalMode.DEEP_RESEARCH
+                } else {
+                    com.example.knowledge.RetrievalMode.FAST_RETRIEVAL
+                },
+                knowledgeDaoOverride = db.knowledgeDao()
+            )
+        }
+    }
+
+    fun cancelActiveKnowledgeResearch(): Boolean {
+        return com.example.knowledge.IntelligentKnowledgeRouter.cancelActiveResearch()
+    }
+
     override fun onCleared() {
         super.onCleared()
+        HandsFreeSessionController.registerSpotterHooks(null, null)
+        com.example.service.JarvisBackgroundService.registerRuntimeHooks(null, null)
         offlineKeywordSpotter.stopListening()
         liveSessionManager.stopSession()
     }
